@@ -1,0 +1,43 @@
+# -----------------------------------------------------------------------------
+# Projeto dbt — camadas SILVER e GOLD do BanVic
+#   bronze (source, Meltano)  ->  silver (tipado/testado)  ->  gold (negócio)
+# Executado pelo Airflow via KubernetesPodOperator:
+#   dbt build --select silver   |   dbt build --select gold
+# -----------------------------------------------------------------------------
+name: banvic
+version: "1.0.0"
+profile: banvic
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+vars:
+  # Janela de reprocessamento da carga incremental de transações (dias).
+  # Cobre lançamentos atrasados/ajustados sem reprocessar todo o histórico.
+  transacoes_lookback_days: 3
+  # Dias sem transacionar a partir dos quais o cliente é sinalizado como risco de churn.
+  churn_dias_sem_transacao: 90
+
+models:
+  banvic:
+    +persist_docs:
+      relation: true
+      columns: true
+    silver:
+      +schema: silver
+      +materialized: table
+      +tags: ["silver"]
+    gold:
+      +schema: gold
+      +materialized: table
+      +tags: ["gold"]
+
+data_tests:
+  banvic:
+    +store_failures: false

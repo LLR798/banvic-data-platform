@@ -1,0 +1,10 @@
+# Quebras de linha sempre LF no repositório e no checkout, em qualquer sistema.
+# Evita que um clone pelo Windows converta os scripts Bash para CRLF
+# ("/bin/bash^M: bad interpreter").
+* text=auto eol=lf
+
+# Binários: sem conversão nem diff textual
+*.zip binary
+*.png binary
+*.jpg binary
+*.gif binary

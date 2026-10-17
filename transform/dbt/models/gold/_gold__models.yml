@@ -1,0 +1,101 @@
+version: 2
+
+# -----------------------------------------------------------------------------
+# Camada GOLD: modelo dimensional + mart de negócio para a Diretoria Comercial.
+# Sem PII. Única camada liberada para a role "analyst".
+# Integridade referencial aqui é ERROR: a Gold precisa fechar 100% nos joins.
+# -----------------------------------------------------------------------------
+
+models:
+  - name: dim_agencia
+    description: Agências com quantidade de colaboradores lotados.
+    columns:
+      - name: cod_agencia
+        data_tests: [unique, not_null]
+
+  - name: dim_colaborador
+    description: Colaboradores e sua agência (sem CPF/e-mail/endereço).
+    columns:
+      - name: cod_colaborador
+        data_tests: [unique, not_null]
+
+  - name: dim_cliente
+    description: >
+      Clientes sem PII, com faixa etária, UF e conta. Inclui membro
+      "CLIENTE NÃO IDENTIFICADO" para chaves órfãs da origem.
+    columns:
+      - name: cod_cliente
+        data_tests: [unique, not_null]
+      - name: cliente_cadastrado
+        description: false quando o cliente aparece em contas/propostas mas não no cadastro.
+      - name: faixa_etaria
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Até 24", "25-34", "35-44", "45-59", "60+", "Não informado"]
+
+  - name: fct_transacoes
+    description: Fato de transações (grão = 1 transação).
+    columns:
+      - name: cod_transacao
+        data_tests: [unique, not_null]
+      - name: cod_cliente
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_cliente')
+                field: cod_cliente
+      - name: cod_agencia
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_agencia')
+                field: cod_agencia
+      - name: categoria
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["Pix", "Cartão", "Transferência", "Numerário", "Pagamento", "Estorno", "Outros"]
+
+  - name: fct_propostas_credito
+    description: Fato de propostas de crédito (grão = 1 proposta).
+    columns:
+      - name: cod_proposta
+        data_tests: [unique, not_null]
+      - name: cod_cliente
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_cliente')
+                field: cod_cliente
+      - name: cod_colaborador
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_colaborador')
+                field: cod_colaborador
+
+  - name: mart_cliente_mensal
+    description: >
+      1 linha por cliente x mês com volume de transações, janela móvel de 3 meses,
+      recência e status (ativo, inativo_no_mes, risco_churn, sem_historico).
+      Base do dashboard comercial (transações por cliente e churn).
+    columns:
+      - name: sk_cliente_mes
+        description: Chave substituta cliente-mês.
+        data_tests: [unique, not_null]
+      - name: cod_cliente
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_cliente')
+                field: cod_cliente
+      - name: status_cliente
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ativo", "inativo_no_mes", "risco_churn", "sem_historico"]

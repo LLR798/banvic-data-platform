@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Cópia fiel dos 7 CSVs do ERP (banvic_data.zip), carregada pelo Meltano
+      (tap-csv -> target-postgres). Todas as colunas de negócio são texto;
+      colunas _sdc_* são metadados de ingestão/linhagem.
+    schema: bronze
+    loaded_at_field: _sdc_batched_at
+    tables:
+      - name: agencias
+        description: Agências físicas e digital.
+      - name: colaboradores
+        description: Colaboradores (contém PII - CPF, e-mail, endereço).
+      - name: colaborador_agencia
+        description: Lotação de cada colaborador em uma agência.
+      - name: clientes
+        description: Clientes (contém PII - CPF/CNPJ, e-mail, endereço).
+      - name: contas
+        description: Contas correntes, uma por cliente.
+      - name: propostas_credito
+        description: Propostas de crédito e seu status.
+      - name: transacoes
+        description: Transações das contas (2010-2023).

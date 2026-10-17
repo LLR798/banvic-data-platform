@@ -1,0 +1,7 @@
+# Providers usados pelas DAGs. Já vêm na imagem oficial; fixados aqui para
+# documentar a dependência e travar versões (instalados com o constraints
+# oficial do Airflow 3.2.2 -> versões compatíveis garantidas).
+apache-airflow-providers-cncf-kubernetes==10.17.1
+apache-airflow-providers-amazon==9.29.0
+apache-airflow-providers-postgres==6.7.0
+apache-airflow-providers-common-sql==2.0.0

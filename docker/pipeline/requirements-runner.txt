@@ -1,0 +1,2 @@
+# Dependências do runner.py (download/upload no MinIO via API S3).
+boto3==1.43.113

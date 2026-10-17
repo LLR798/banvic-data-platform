@@ -1,0 +1,36 @@
+# Terraform (estado contém as senhas geradas -> nunca versionar)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Meltano / dbt
+ingestion/meltano/.meltano/
+ingestion/meltano/output/
+transform/dbt/target/
+transform/dbt/logs/
+transform/dbt/dbt_packages/
+logs/
+
+# Segredos locais e lixo de SO/IDE
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+diag/
+transform/dbt/.user.yml
+
+# extras:
+comandos_uteis.md

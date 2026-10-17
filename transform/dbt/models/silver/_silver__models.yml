@@ -1,0 +1,167 @@
+version: 2
+
+# -----------------------------------------------------------------------------
+# Contratos da camada SILVER.
+# severity: error -> interrompe a DAG antes da Gold (dado ruim não chega ao BI)
+# severity: warn  -> problema conhecido da origem, registrado mas não bloqueante
+# -----------------------------------------------------------------------------
+
+models:
+  - name: agencias
+    description: Agências do BanVic, tipadas.
+    columns:
+      - name: cod_agencia
+        description: Chave primária da agência.
+        data_tests: [unique, not_null]
+      - name: uf
+        data_tests: [not_null]
+      - name: tipo_agencia
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Física", "Digital"]
+
+  - name: colaboradores
+    description: Colaboradores. Contém PII (CPF, e-mail, endereço) - não exposto na Gold.
+    columns:
+      - name: cod_colaborador
+        data_tests: [unique, not_null]
+      - name: cpf
+        data_tests: [not_null]
+
+  - name: colaborador_agencia
+    description: Lotação (colaborador -> agência).
+    columns:
+      - name: cod_colaborador
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('colaboradores')
+                field: cod_colaborador
+      - name: cod_agencia
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('agencias')
+                field: cod_agencia
+
+  - name: clientes
+    description: Clientes. Contém PII (CPF/CNPJ, e-mail, endereço) - não exposto na Gold.
+    columns:
+      - name: cod_cliente
+        data_tests: [unique, not_null]
+      - name: tipo_cliente
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["PF", "PJ"]
+      - name: data_inclusao
+        data_tests: [not_null]
+      - name: cep
+        description: CEP normalizado com 8 dígitos.
+
+  - name: contas
+    description: Contas correntes (1 por cliente).
+    columns:
+      - name: num_conta
+        data_tests: [unique, not_null]
+      - name: cod_cliente
+        description: >
+          Problema conhecido da origem: o cliente 528 tem conta mas não existe
+          em clientes. Registrado como WARN; a Gold trata com membro "não identificado".
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('clientes')
+                field: cod_cliente
+              config:
+                severity: warn
+      - name: cod_agencia
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('agencias')
+                field: cod_agencia
+      - name: cod_colaborador
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('colaboradores')
+                field: cod_colaborador
+      - name: saldo_total
+        data_tests: [not_null]
+
+  - name: propostas_credito
+    description: Propostas de crédito.
+    columns:
+      - name: cod_proposta
+        data_tests: [unique, not_null]
+      - name: cod_cliente
+        description: Mesmo problema da origem (cliente 528) - WARN.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('clientes')
+                field: cod_cliente
+              config:
+                severity: warn
+      - name: cod_colaborador
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('colaboradores')
+                field: cod_colaborador
+      - name: status_proposta
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["Enviada", "Aprovada", "Validação documentos", "Em análise"]
+      - name: valor_financiamento
+        data_tests: [not_null]
+
+  - name: transacoes
+    description: Transações (incremental, delete+insert por cod_transacao).
+    columns:
+      - name: cod_transacao
+        data_tests: [unique, not_null]
+      - name: num_conta
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('contas')
+                field: num_conta
+      - name: data_transacao
+        data_tests: [not_null]
+      - name: valor_transacao
+        data_tests: [not_null]
+      - name: nome_transacao
+        description: Tipo da transação. Novos tipos geram WARN para revisão de negócio.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - "Compra Crédito"
+                  - "Compra Débito"
+                  - "Pix - Realizado"
+                  - "Pix - Recebido"
+                  - "Pix Saque"
+                  - "Depósito em espécie"
+                  - "Saque"
+                  - "TED - Recebido"
+                  - "TED - Realizado"
+                  - "DOC - Recebido"
+                  - "DOC - Realizado"
+                  - "Pagamento de boleto"
+                  - "Transferência entre CC - Crédito"
+                  - "Transferência entre CC - Débito"
+                  - "Estorno de Debito"
+              config:
+                severity: warn

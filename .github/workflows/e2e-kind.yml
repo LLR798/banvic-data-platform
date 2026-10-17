@@ -1,0 +1,72 @@
+# -----------------------------------------------------------------------------
+# E2E: sobe a stack INTEIRA do zero num cluster Kind efêmero dentro do runner,
+# exatamente com os mesmos comandos do laptop (make up / make demo), e destrói.
+# Prova que o ambiente é reprodutível e que a DAG roda com sucesso.
+# -----------------------------------------------------------------------------
+name: E2E (Kind)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "dags/**"
+      - "docker/**"
+      - "ingestion/**"
+      - "transform/**"
+      - "sql/**"
+      - "scripts/**"
+      - "Makefile"
+      - ".github/workflows/e2e-kind.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  INGESTION_DATE: "2026-01-01"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.5"
+          terraform_wrapper: false
+      - name: Instala o CLI do Kind (o cluster é criado pelo Terraform)
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          install_only: true
+      - name: make up (cluster + imagens + plataforma)
+        run: make up
+      - name: make demo (seed + DAG + validação)
+        run: make demo INGESTION_DATE=${{ env.INGESTION_DATE }}
+      - name: Reexecução do mesmo dia (idempotência)
+        run: |
+          make trigger INGESTION_DATE=${{ env.INGESTION_DATE }}
+          make validate
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: |
+          mkdir -p diag
+          kubectl get pods -A -o wide > diag/pods.txt || true
+          kubectl get events -A --sort-by=.lastTimestamp > diag/events.txt || true
+          kubectl -n airflow logs -l component=scheduler -c scheduler --tail=-1 > diag/scheduler.log || true
+          kubectl -n airflow describe pods > diag/airflow-pods.txt || true
+          kubectl -n data describe pods > diag/data-pods.txt || true
+      - name: Publica diagnóstico
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-diagnostics
+          path: diag/
+      - name: make down
+        if: always()
+        run: make down

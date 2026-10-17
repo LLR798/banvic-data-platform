@@ -1,0 +1,26 @@
+[project]
+name = "banvic-data-platform"
+version = "0.1.0"
+description = "POC de infraestrutura e pipeline medalhão para o BanVic (Kind + Terraform + Airflow + Meltano + dbt)."
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [".meltano", "target", "dbt_packages", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "BLE"]
+ignore = ["S603"]  # subprocess com argumentos fixos (runner)
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+"dags/banvic/config.py" = ["S105"]  # nomes de Secrets do K8s, não valores
+
+[tool.ruff.lint.isort]
+known-first-party = ["banvic", "conftest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["dags", "tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

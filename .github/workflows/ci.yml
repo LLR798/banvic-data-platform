@@ -1,0 +1,181 @@
+# -----------------------------------------------------------------------------
+# CI: roda em todo push/PR. Garante qualidade de código, DAGs, dados e IaC.
+# Actions fixadas por SHA (proteção contra ataques de supply chain em tags).
+# -----------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AIRFLOW_VERSION: "3.2.2"
+  PYTHON_VERSION: "3.12"
+  TERRAFORM_VERSION: "1.16.5"
+
+jobs:
+  lint:
+    name: Lint (Python + YAML)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: ruff (lint)
+        run: uvx ruff@0.17.0 check --output-format=github .
+      - name: ruff (formatação)
+        run: uvx ruff@0.17.0 format --check .
+      - name: yamllint
+        run: uvx yamllint@1.38.0 -s .
+
+  dag-tests:
+    name: Testes de integridade das DAGs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Instala Airflow + providers (com constraints oficiais)
+        run: |
+          uv venv
+          uv pip install -r requirements-dev.txt \
+            -c "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+      - name: pytest (DagBag, dependências, retries, segredos, contratos)
+        run: uv run --no-sync pytest -v
+
+  data-pipeline:
+    name: Pipeline de dados (Meltano + dbt) contra Postgres real
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dw_admin
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: banvic_dw
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dw_admin -d banvic_dw"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Senhas efêmeras, válidas só dentro deste job (o banco é descartado).
+      PGHOST: localhost
+      PGPASSWORD: ci-only-password
+      POSTGRES_USER: dw_admin
+      POSTGRES_DB: banvic_dw
+      SVC_INGESTION_PASSWORD: ci-ingestion
+      SVC_TRANSFORM_PASSWORD: ci-transform
+      SVC_ORCHESTRATOR_PASSWORD: ci-orchestrator
+      ANALYST_PASSWORD: ci-analyst
+      DW_HOST: localhost
+      DW_PORT: "5432"
+      DW_DATABASE: banvic_dw
+      TARGET_POSTGRES_USER: svc_ingestion
+      TARGET_POSTGRES_PASSWORD: ci-ingestion
+      DBT_USER: svc_transform
+      DBT_PASSWORD: ci-transform
+      INGESTION_DATE: "2026-01-01"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Bootstrap do DW (schemas do medalhão + roles)
+        run: bash sql/bootstrap/init_dw.sh
+      - name: Instala Meltano e dbt (mesmas versões da imagem)
+        run: |
+          uv tool install --with-requirements docker/pipeline/requirements-meltano.txt meltano
+          uv tool install --with-requirements docker/pipeline/requirements-dbt.txt dbt-core
+          cd ingestion/meltano && meltano install
+      - name: Bronze - Meltano carrega os 7 CSVs
+        run: |
+          export BANVIC_INPUT_DIR="$RUNNER_TEMP/input/ingestion_date=$INGESTION_DATE"
+          mkdir -p "$BANVIC_INPUT_DIR"
+          unzip -j -o data/banvic_data.zip '*.csv' -d "$BANVIC_INPUT_DIR"
+          cd ingestion/meltano
+          meltano run --no-state-update tap-csv target-postgres
+          # Idempotência: segunda execução não pode duplicar linhas
+          meltano run --no-state-update tap-csv target-postgres
+      - name: Silver - dbt build (modelos + testes)
+        working-directory: transform/dbt
+        run: dbt build --select tag:silver --profiles-dir .
+      - name: Gold - dbt build (modelos + testes)
+        working-directory: transform/dbt
+        run: dbt build --select tag:gold --profiles-dir .
+      - name: Silver incremental - reexecução idempotente
+        working-directory: transform/dbt
+        run: dbt build --select tag:silver --profiles-dir .
+      - name: Validação ponta a ponta (contagens, integridade, permissões)
+        run: |
+          # A auditoria (ops) é escrita pelo Airflow; aqui validamos os dados.
+          psql -U dw_admin -d banvic_dw -v ON_ERROR_STOP=1 -f sql/validation/validate.sql
+
+  terraform:
+    name: Terraform (fmt, validate, tflint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff infra/terraform
+      - name: terraform validate (cluster e platform)
+        run: |
+          for stack in infra/terraform/cluster infra/terraform/platform; do
+            echo "::group::$stack"
+            terraform -chdir="$stack" init -backend=false -input=false
+            terraform -chdir="$stack" validate
+            echo "::endgroup::"
+          done
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+  k8s-manifests:
+    name: Manifestos K8s do Airflow (helm template + kubeconform)
+    runs-on: ubuntu-latest
+    needs: terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Instala kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+      - name: Renderiza values (mesmo template usado pelo Terraform)
+        run: bash scripts/render_airflow_values.sh > "$RUNNER_TEMP/airflow-values.yaml"
+      - name: helm template | kubeconform
+        run: |
+          helm repo add apache-airflow https://airflow.apache.org
+          helm template airflow apache-airflow/airflow --version 1.22.0 --namespace airflow \
+            -f "$RUNNER_TEMP/airflow-values.yaml" \
+            | kubeconform -strict -summary -kubernetes-version 1.35.0 -ignore-missing-schemas
+
+  security:
+    name: Varredura de segredos (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          exit-code: "1"

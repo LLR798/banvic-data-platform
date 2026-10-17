@@ -1,0 +1,3 @@
+# Meltano (orquestra tap-csv -> target-postgres). Plugins são instalados
+# em venvs isolados por `meltano install` a partir do meltano.yml.
+meltano==4.4.1

@@ -1,0 +1,131 @@
+# -----------------------------------------------------------------------------
+# Values do chart oficial apache-airflow (renderizado pelo Terraform).
+# As variáveis de template são preenchidas em infra/terraform/platform/airflow.tf.
+# Nenhum segredo aqui: só NOMES de Secrets do Kubernetes.
+# -----------------------------------------------------------------------------
+airflowVersion: "${airflow_version}"
+defaultAirflowRepository: ${airflow_image_repository}
+defaultAirflowTag: "${airflow_image_tag}"
+
+images:
+  airflow:
+    repository: ${airflow_image_repository}
+    tag: "${airflow_image_tag}"
+    pullPolicy: IfNotPresent
+
+# LocalExecutor: o scheduler executa as tasks leves (sensor, validação, auditoria)
+# e dispara pods efêmeros (KubernetesPodOperator) para o trabalho pesado.
+executor: LocalExecutor
+allowPodLaunching: true
+
+# Banco de metadados externo (StatefulSet próprio, gerenciado pelo Terraform).
+postgresql:
+  enabled: false
+data:
+  metadataSecretName: ${metadata_secret}
+
+# Componentes que não usamos com LocalExecutor -> menos RAM no laptop.
+redis:
+  enabled: false
+pgbouncer:
+  enabled: false
+statsd:
+  enabled: false
+triggerer:
+  enabled: false
+
+# Chaves criptográficas vindas de Secrets gerados pelo Terraform.
+fernetKeySecretName: ${fernet_secret}
+apiSecretKeySecretName: ${api_secret}
+jwtSecretName: ${jwt_secret}
+
+# Conexões (MinIO e DW) injetadas como AIRFLOW_CONN_* a partir de um Secret.
+secret:
+  - envName: AIRFLOW_CONN_LAKE_S3
+    secretName: ${connections_secret}
+    secretKey: AIRFLOW_CONN_LAKE_S3
+  - envName: AIRFLOW_CONN_DW_POSTGRES
+    secretName: ${connections_secret}
+    secretKey: AIRFLOW_CONN_DW_POSTGRES
+
+# Configuração não sensível consumida pelas DAGs (dags/banvic/config.py).
+env:
+  - name: BANVIC_PIPELINE_IMAGE
+    value: "${pipeline_image}"
+  - name: BANVIC_JOBS_NAMESPACE
+    value: "${jobs_namespace}"
+  - name: BANVIC_LAKE_BUCKET
+    value: "${lake_bucket}"
+  - name: BANVIC_BRONZE_MAX_PARALLEL
+    value: "3"
+  # Compatibilidade do boto3 recente com storages S3-compatíveis (MinIO).
+  - name: AWS_REQUEST_CHECKSUM_CALCULATION
+    value: "when_required"
+  - name: AWS_RESPONSE_CHECKSUM_VALIDATION
+    value: "when_required"
+
+config:
+  core:
+    load_examples: "False"
+    # DAGs nascem pausadas (padrão seguro); `make trigger` faz o unpause.
+    dags_are_paused_at_creation: "True"
+  dag_processor:
+    # Intervalo (s) para descobrir arquivos novos na pasta de DAGs.
+    refresh_interval: 30
+
+# Com Terraform (helm --wait) os jobs NÃO podem ser hooks pós-instalação,
+# senão o helm espera pods que esperam a migração (deadlock).
+migrateDatabaseJob:
+  useHelmHooks: false
+  applyCustomEnv: false
+createUserJob:
+  useHelmHooks: false
+  applyCustomEnv: false
+  defaultUser:
+    role: Admin
+    username: ${airflow_admin_username}
+    email: admin@banvic.local
+    firstName: Admin
+    lastName: BanVic
+    # password: definido via set_sensitive no Terraform
+
+# DAGs embutidas na imagem (sem git-sync / PVC) -> reprodutível no CI e no laptop.
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: false
+
+logs:
+  persistence:
+    enabled: false
+
+# UI exposta em http://localhost:8080 (NodePort mapeado pelo Kind).
+apiServer:
+  service:
+    type: NodePort
+    ports:
+      - name: api-server
+        port: 8080
+        nodePort: ${airflow_ui_node_port}
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 1536Mi }
+
+# Com LocalExecutor o scheduler também é o "worker": vira StatefulSet com
+# volume próprio para os logs das tasks (sobrevivem a reinícios do pod).
+workers:
+  celery:
+    persistence:
+      enabled: true
+      size: 2Gi
+
+scheduler:
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 2Gi }
+
+dagProcessor:
+  resources:
+    requests: { cpu: 100m, memory: 384Mi }
+    limits: { memory: 1Gi }
