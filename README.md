@@ -180,6 +180,10 @@ Outros comandos: `make help` · `make status` · `make logs` · `make psql` · `
 Reprocessar uma data específica: `make demo INGESTION_DATE=2026-10-13` (ou, na UI, *Trigger DAG* com
 `{"ingestion_date": "2026-10-13"}`).
 
+> **Ambiente recém-criado:** rode o primeiro `make demo` **sem** `INGESTION_DATE` (usa a data de hoje, em
+> UTC). Ao despausar a DAG, o Airflow cria a execução agendada do dia e, como `max_active_runs=1`, ela roda
+> antes de qualquer execução manual. Ela só termina quando o arquivo de hoje chega à landing.
+
 ---
 
 ## 4. Estratégia de ingestão
