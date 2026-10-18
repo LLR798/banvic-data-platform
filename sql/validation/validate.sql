@@ -6,6 +6,17 @@
 -- =============================================================================
 \set ON_ERROR_STOP on
 \pset footer off
+\echo '== 0. Configuração: fuso horário do DW (define o dia/mês das transações na Gold)'
+DO $$
+BEGIN
+    IF current_setting('TimeZone') <> 'America/Sao_Paulo' THEN
+        RAISE EXCEPTION 'Fuso do DW é %, esperado America/Sao_Paulo (ver sql/bootstrap/init_dw.sh)',
+            current_setting('TimeZone');
+    END IF;
+    RAISE NOTICE 'OK: fuso do DW = America/Sao_Paulo';
+END $$;
+
+\echo
 \echo '== 1. Contagem por camada (esperado = linhas dos CSVs do banvic_data.zip)'
 
 WITH expected(tabela, esperado) AS (
@@ -85,14 +96,25 @@ UNION ALL SELECT 'fct_propostas_credito', count(*) FROM gold.fct_propostas_credi
 UNION ALL SELECT 'mart_cliente_mensal', count(*) FROM gold.mart_cliente_mensal;
 
 \echo
-\echo '== 5. Gold: média de transações por cliente ativo, por ano'
-SELECT extract(year FROM mes)::int AS ano,
+\echo '== 5. Gold: transações por cliente ativo, por ano (períodos com menos de 12 meses = parcial)'
+WITH base AS (
+    SELECT m.*,
+           extract(year FROM m.mes)::int AS ano,
+           max(m.mes) OVER (PARTITION BY extract(year FROM m.mes)) AS ultimo_mes_do_ano
+    FROM gold.mart_cliente_mensal m
+)
+SELECT ano,
+       count(DISTINCT mes) FILTER (WHERE qtd_transacoes > 0) AS meses_com_dados,
+       CASE WHEN count(DISTINCT mes) FILTER (WHERE qtd_transacoes > 0) < 12 THEN 'parcial' ELSE 'completo' END
+           AS periodo,
        round(sum(qtd_transacoes)::numeric / nullif(count(DISTINCT cod_cliente) FILTER (WHERE qtd_transacoes > 0), 0), 1)
            AS transacoes_por_cliente_ativo,
-       count(DISTINCT cod_cliente) FILTER (WHERE status_cliente = 'risco_churn' AND mes = date_trunc('year', mes) + interval '11 months')
-           AS clientes_em_risco_dezembro
-FROM gold.mart_cliente_mensal
-GROUP BY 1 ORDER BY 1;
+       -- Risco de churn no último mês disponível do ano (dezembro nos anos completos).
+       count(DISTINCT cod_cliente) FILTER (WHERE status_cliente = 'risco_churn' AND mes = ultimo_mes_do_ano)
+           AS clientes_em_risco_fim_do_periodo
+FROM base
+GROUP BY ano
+ORDER BY ano;
 
 \echo
 \echo '== 6. Auditoria das últimas execuções (ops.pipeline_audit)'

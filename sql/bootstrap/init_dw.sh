@@ -33,6 +33,14 @@ psql -v ON_ERROR_STOP=1 \
   -v analyst_pwd="$ANALYST_PASSWORD" <<'EOSQL'
 
 -- ---------------------------------------------------------------------------
+-- 0. Fuso horário do DW (regra de negócio, não detalhe de infraestrutura)
+--    A origem grava os horários em UTC; o "dia" e o "mês" de uma transação na
+--    Gold seguem o horário de Brasília. Fixar o fuso no banco garante que dbt,
+--    Airflow e qualquer sessão sem fuso próprio calculem os mesmos meses.
+-- ---------------------------------------------------------------------------
+ALTER DATABASE :"dbname" SET timezone TO 'America/Sao_Paulo';
+
+-- ---------------------------------------------------------------------------
 -- 1. Roles (uma por responsabilidade -> princípio do menor privilégio)
 -- ---------------------------------------------------------------------------
 CREATE ROLE svc_ingestion    LOGIN PASSWORD :'ingestion_pwd';    -- Meltano: escreve Bronze
