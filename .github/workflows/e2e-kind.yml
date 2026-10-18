@@ -27,9 +27,6 @@ concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  INGESTION_DATE: "2026-01-01"
-
 jobs:
   e2e:
     runs-on: ubuntu-latest
@@ -44,6 +41,12 @@ jobs:
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
           install_only: true
+      # A data do teste é HOJE (UTC), calculada uma única vez: ao despausar, o Airflow
+      # cria a execução agendada do dia e, com max_active_runs=1, ela roda antes da
+      # manual. Se o arquivo de hoje não existisse, essa execução ficaria no sensor
+      # (até 6 h) e bloquearia a fila.
+      - name: Define a data da partição de teste
+        run: echo "INGESTION_DATE=$(date -u +%F)" >> "$GITHUB_ENV"
       - name: make up (cluster + imagens + plataforma)
         run: make up
       - name: make demo (seed + DAG + validação)
