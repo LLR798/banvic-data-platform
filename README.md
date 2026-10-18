@@ -228,6 +228,11 @@ resolve), e o alerta sai na hora.
   transação zerados) traz quantidade de transações, janela móvel de 3 meses, recência e status
   (`ativo`, `inativo_no_mes`, `risco_churn`, `sem_historico`). A recência é medida contra a última data da
   base (jan/2023), não contra hoje.
+- **Fuso horário é regra de negócio:** a origem grava os horários em UTC, mas o dia e o mês de uma
+  transação seguem o **horário de Brasília**. Sem isso fixado, o resultado da Gold dependeria do fuso da
+  sessão que rodou o dbt: uma transação às 22h de 31/jan (Brasília) cairia em fevereiro em UTC. O
+  bootstrap fixa `timezone = America/Sao_Paulo` no banco, e o `make validate` falha se o DW estiver
+  com outro fuso.
 
 ### 4.4 Idempotência
 
@@ -287,6 +292,18 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 | [`build-images.yml`](.github/workflows/build-images.yml) | mudanças em código/Dockerfiles | Build **multi-arch** (amd64 + arm64) das imagens Airflow e pipeline; em `main`/tags publica no GHCR |
 | [`e2e-kind.yml`](.github/workflows/e2e-kind.yml) | PR para `main` / manual | Sobe a stack inteira **do zero** num Kind efêmero no runner com `make up`, roda `make demo`, reexecuta (idempotência), coleta diagnóstico se falhar e destrói |
 
+- **Proteção do `main`:** um *ruleset* exige os 6 jobs do `ci.yml` verdes para qualquer merge (push direto
+  bloqueado; só o administrador pode fazer *bypass*, de forma explícita). O E2E e o build de imagens não
+  são obrigatórios **de propósito**: só rodam quando o PR altera caminhos que os afetam (filtro `paths`), e
+  um check obrigatório que não roda travaria o merge para sempre.
+- **CI × CD:** o CI valida toda mudança **antes** do merge, e o E2E é o teste mais completo do CI. O CD
+  aqui é *Continuous Delivery*: no merge para `main`, as imagens multi-arch são publicadas no GHCR,
+  prontas para implantação; o deploy local é o `make up`. Na AWS o CD passa a implantar sozinho (seção 10).
+- **O que o E2E prova:** que o ambiente sobe do zero numa máquina limpa (Ubuntu amd64 do GitHub,
+  diferente do Mac arm64 de desenvolvimento), sem nenhum estado escondido, e que a DAG roda duas vezes
+  sem duplicar dados. **O que ele não prova:** o comportamento de serviços gerenciados (IAM, VPC, EBS,
+  cotas), que exigiria um ambiente de *staging* na AWS.
+
 ---
 
 ## 8. Estrutura do repositório
@@ -337,6 +354,15 @@ JOIN gold.dim_agencia a USING (cod_agencia)
 WHERE m.mes = (SELECT max(mes) FROM gold.mart_cliente_mensal) AND m.status_cliente = 'risco_churn'
 GROUP BY 1 ORDER BY 2 DESC;
 ```
+
+**Achados nos dados (para a Diretoria Comercial)**, conferidos contra os CSVs originais:
+
+| Achado | Evidência | Leitura |
+|---|---|---|
+| Salto de volume em 2022 | 36.504 transações em 2022 (metade de toda a base) contra 7.776 em 2021; 46,7 transações por cliente ativo, contra 12–14 nos anos anteriores | Mudança real na origem: crescimento, novo produto (ex.: Pix) ou migração de sistema. Precisa ser explicada antes de qualquer conclusão sobre engajamento |
+| 2010 e 2023 são períodos parciais | A base começa em 27/02/2010 e termina em 15/01/2023 (2023 tem só 8 clientes ativos) | As médias desses anos não são comparáveis com as demais. O `make validate` marca anos com menos de 12 meses como `parcial` |
+| Risco de churn atual | 296 clientes em `risco_churn` no último mês da base (jan/2023) | O número mais acionável para retenção, quebrável por agência com a 2ª query acima |
+| Cliente sem cadastro | `cod_cliente = 528` tem 1 conta e 4 propostas, mas não existe em `clientes` | Problema de qualidade na origem: WARN na Silver e membro "não identificado" na Gold |
 
 ---
 
@@ -392,6 +418,11 @@ flowchart LR
 | GitHub Actions | GitHub Actions + OIDC → IAM | Sem chaves AWS no repositório |
 | Logs nos pods | CloudWatch + OpenLineage | Remote logging do Airflow |
 
+**CI/CD em produção:** merge em `main` → build e push no **ECR** (tag = SHA do commit) → `terraform apply`
+automático no ambiente de **staging** (credenciais via OIDC, sem chave estática) → E2E contra staging →
+promoção para **produção** com aprovação manual (*GitHub Environments* com revisores obrigatórios).
+Rollback = reaplicar a tag de imagem anterior.
+
 Caminho natural depois disso: Bronze/Silver em formato aberto (Delta/Iceberg) no S3 com Databricks ou
 Athena, mantendo o dbt como camada de transformação.
 
@@ -417,5 +448,7 @@ Athena, mantendo o dbt como camada de transformação.
 - Cluster de 1 nó e Postgres single-instance (sem HA); backup do DW não automatizado.
 - MinIO: imagens oficiais removidas pelo fornecedor; usamos a build da Chainguard (ver nota na seção 2).
 - Alertas externos dependem de configurar `BANVIC_ALERT_WEBHOOK_URL`.
+- Períodos parciais (2010 e 2023) são sinalizados no relatório de validação, mas ainda não no modelo:
+  o próximo passo seria uma coluna `periodo_completo` no `mart_cliente_mensal`, para o BI filtrar.
 - A Gold atende ao primeiro caso de uso comercial (transações por cliente e churn). Análises
   estatísticas de alavancas (pedido da CEO) seriam o próximo passo, sobre esta mesma Gold.
