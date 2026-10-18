@@ -64,7 +64,7 @@ DEFAULT_ARGS = {
     "owner": "data-engineering",
     "depends_on_past": False,
     # Resiliência: 3 novas tentativas com backoff exponencial (30s, 60s, 120s...)
-    "retries": 3,
+    "retries": 0,
     "retry_delay": timedelta(seconds=30),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=10),
