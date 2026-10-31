@@ -21,6 +21,25 @@ centralizado por analistas e ferramentas de BI.
 
 ---
 
+## 0. O problema do BanVic e como esta POC responde
+
+Hoje as análises do BanVic são feitas à mão, em planilhas, a partir de cópias do ERP. A CEO quer decidir
+com dados; a Diretoria Comercial precisa **aumentar as transações por cliente e reduzir o churn**, mas é
+cética e detém parte dos dados comerciais, o que costuma travar acessos. A POC foi desenhada a partir
+dessas dores:
+
+| Dor / meta (quem) | O que a POC entrega | Onde está | Limitação e próximo passo |
+|---|---|---|---|
+| Análises manuais e arriscadas (André, TI) | Pipeline automático e diário, reprodutível do zero com `make up`, com auditoria de cada execução e logs persistidos | Terraform, Airflow, `ops.pipeline_audit`, bucket de logs | Lote diário; nó único (sem alta disponibilidade) |
+| Mais transações por cliente e menos churn (Camila, Comercial) | `gold.mart_cliente_mensal`: cliente × mês com transações, janela de 3 meses, recência e status (`ativo`, `risco_churn`...), pronta para o Power BI | dbt Gold, seção 9 | O dashboard em si não faz parte da POC; a Gold é a base dele |
+| Ceticismo e confiança nos números (Camila) | Reconciliação automática origem → Bronze → Silver, 64 testes dbt, problema real da origem exposto e tratado (cliente 528) | `make validate`, testes dbt | Regras de negócio validadas com o time comercial seriam a próxima rodada |
+| Dados comerciais sensíveis e acessos burocráticos (Comercial, LGPD) | Acesso por camada: o analista só lê a Gold, sem dados pessoais; cada job tem credencial própria. Liberar acesso vira uma permissão no banco, não uma cópia de planilha | Roles do DW, seção 6 | CRM e marketing não vieram no zip: quando entrarem, seguem o mesmo modelo de permissões |
+| Piloto em crédito (Lucas, Dados) | `gold.fct_propostas_credito` (2.000 propostas) ligada a clientes, agências e colaboradores | dbt Gold | A análise de crédito em si é o passo seguinte do piloto |
+| Ranking das alavancas que movem o ponteiro (Sofia, CEO) | Base pronta: fatos e dimensões no grão cliente × mês | Gold | **Não entregue**: exige uma etapa analítica (modelo estatístico sobre a Gold), fora do escopo de engenharia desta POC |
+| Piloto com custo e risco baixos | 100% local, custo de nuvem zero; o mesmo código migra para a AWS sem reescrita | Seção 10 | Serviços gerenciados (IAM, rede) só se validam num ambiente de staging |
+
+---
+
 ## 1. Arquitetura
 
 ### 1.1 Infraestrutura
@@ -482,6 +501,9 @@ Athena, mantendo o dbt como camada de transformação.
 - Cluster de 1 nó e Postgres single-instance (sem HA); backup do DW não automatizado.
 - Os Secrets do Kubernetes ficam em base64 no etcd do Kind, sem criptografia em repouso. Em produção:
   EKS com criptografia de Secrets por KMS e os valores vindos do AWS Secrets Manager (External Secrets).
+- Com `max_active_runs=1`, a execução agendada do dia roda antes de qualquer reprocessamento manual e
+  espera o arquivo de hoje no sensor. Por isso o E2E usa a data de hoje (UTC); um E2E iniciado perto da
+  meia-noite UTC (≈21h em Brasília) pode ficar preso. Evolução: uma DAG separada para reprocessamentos.
 - Execuções que falham no meio da publicação deixam arquivos órfãos em `run=<id>/` (nunca lidos). Uma
   limpeza periódica (como o `VACUUM` do Delta Lake) é a evolução natural.
 - MinIO: imagens oficiais removidas pelo fornecedor; usamos a build da Chainguard (ver nota na seção 2).
