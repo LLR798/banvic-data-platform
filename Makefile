@@ -20,7 +20,7 @@ INGESTION_DATE ?= $(shell date -u +%F)
 
 .DEFAULT_GOAL := help
 .PHONY: help check up cluster images preload platform seed trigger validate demo \
-        credentials psql status logs down lint test fmt lock
+        credentials psql status logs audit down lint test fmt lock
 
 help: ## Lista os comandos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -69,12 +69,15 @@ validate: ## [Fase 3] Valida contagens, integridade e permissões no DW
 demo: seed trigger validate ## seed + trigger + validate
 
 # ----------------------------------------------------------------- operação
-credentials: ## Mostra URLs e senhas geradas
+credentials: ## URLs e senhas (mascaradas; SHOW=1 exibe, COPY=airflow|minio|analyst copia)
 	@TF=$(TF) ./scripts/credentials.sh
 
 psql: ## Abre o psql como analista (somente Gold)
 	PGPASSWORD="$$($(TF) -chdir=$(TF_PLATFORM) output -raw analyst_password)" \
 		psql -h localhost -p 15432 -U analyst -d banvic_dw
+
+audit: ## Logs persistentes, menor privilégio e nenhum segredo nos logs
+	./scripts/audit.sh
 
 status: ## Pods de todos os namespaces do projeto
 	kubectl get pods -n data -o wide

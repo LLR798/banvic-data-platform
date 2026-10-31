@@ -311,6 +311,9 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 | Rede | Portas expostas apenas em `127.0.0.1` (não acessíveis pela rede local) |
 | Containers | Pods do pipeline rodam como não-root (UID 10001), sem escalonamento de privilégio e com `capabilities: drop ALL` |
 | Supply chain | Imagens com versões fixadas (nó do Kind e MinIO por **digest**); MinIO de fonte mantida (Chainguard) após a remoção das imagens oficiais; GitHub Actions fixadas por **SHA** de commit |
+| Mascaramento na UI e nos logs | Conexões vêm de `AIRFLOW_CONN_*` (Secrets): não ficam no banco do Airflow nem aparecem em *Admin → Connections*. `hide_sensitive_var_conn_fields` + `sensitive_var_conn_names` exibem como `***` qualquer campo sensível em Variables, extras de conexão e logs; `expose_config = False` tira o `airflow.cfg` da UI; a URL do webhook de alertas é registrada no mascarador. Os pods do pipeline recebem segredos por `envFrom`, então a UI (*Rendered Template*, *K8s Pod Spec*) só mostra **nomes** de Secrets |
+| Prova automática | `make audit` (também no E2E) procura **cada** valor de segredo do cluster em todos os logs de tarefas e de componentes: o resultado esperado é 0 ocorrências. Também confere o mascaramento e o isolamento entre os usuários do lake e dos logs |
+| Senhas no terminal | `make credentials` mostra as senhas **mascaradas** por padrão (`SHOW=1` exibe; `COPY=airflow` copia para a área de transferência sem exibir), seguro para gravar a tela |
 | Estado do Terraform | `terraform.tfstate` contém as senhas: fica local e está no `.gitignore` (em produção: backend S3 criptografado) |
 
 ---
@@ -321,7 +324,7 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | push/PR | **lint** (ruff, yamllint) · **dag-tests** (DagBag sem erros, dependências na ordem do medalhão, sem ciclos, retries/backoff/callbacks, credenciais só via Secrets) · **data-pipeline** (bootstrap do DW + Meltano + dbt contra um Postgres real, 2× para provar idempotência, + `validate.sql`) · **terraform** (fmt, validate, tflint) · **k8s-manifests** (`helm template` do Airflow com nossos values → `kubeconform`) · **security** (Trivy secret scan) |
 | [`build-images.yml`](.github/workflows/build-images.yml) | mudanças em código/Dockerfiles | Build **multi-arch** (amd64 + arm64) das imagens Airflow e pipeline; em `main`/tags publica no GHCR |
-| [`e2e-kind.yml`](.github/workflows/e2e-kind.yml) | PR para `main` / manual | Sobe a stack inteira **do zero** num Kind efêmero no runner com `make up`, roda `make demo`, reexecuta (idempotência), coleta diagnóstico se falhar e destrói |
+| [`e2e-kind.yml`](.github/workflows/e2e-kind.yml) | PR para `main` / manual | Sobe a stack inteira **do zero** num Kind efêmero no runner com `make up`, roda `make demo`, reexecuta (idempotência), roda `make audit` (logs persistidos, nenhum segredo nos logs), coleta diagnóstico se falhar e destrói |
 
 - **Proteção do `main`:** um *ruleset* exige os 6 jobs do `ci.yml` verdes para qualquer merge (push direto
   bloqueado; só o administrador pode fazer *bypass*, de forma explícita). O E2E e o build de imagens não
@@ -477,6 +480,10 @@ Athena, mantendo o dbt como camada de transformação.
 ## 12. Limitações conhecidas (escopo de POC)
 
 - Cluster de 1 nó e Postgres single-instance (sem HA); backup do DW não automatizado.
+- Os Secrets do Kubernetes ficam em base64 no etcd do Kind, sem criptografia em repouso. Em produção:
+  EKS com criptografia de Secrets por KMS e os valores vindos do AWS Secrets Manager (External Secrets).
+- Execuções que falham no meio da publicação deixam arquivos órfãos em `run=<id>/` (nunca lidos). Uma
+  limpeza periódica (como o `VACUUM` do Delta Lake) é a evolução natural.
 - MinIO: imagens oficiais removidas pelo fornecedor; usamos a build da Chainguard (ver nota na seção 2).
 - Alertas externos dependem de configurar `BANVIC_ALERT_WEBHOOK_URL`.
 - Períodos parciais (2010 e 2023) são sinalizados no relatório de validação, mas ainda não no modelo:

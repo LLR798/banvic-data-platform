@@ -49,3 +49,31 @@ def test_logs_user_is_scoped_to_logs_bucket():
     assert "var.logs_bucket" in policy
     assert "var.bucket" not in policy.replace("var.logs_bucket", ""), "usuário de logs não pode ler o lake"
     assert "s3:DeleteObject" not in policy, "logs são trilha de auditoria: sem permissão de apagar"
+
+
+def test_sensitive_values_are_masked_in_ui_and_logs(values):
+    core = values["config"]["core"]
+    assert core["hide_sensitive_var_conn_fields"] == "True"
+    extra = set(core["sensitive_var_conn_names"].split(","))
+    assert {"secret_access_key", "aws_secret_access_key", "webhook", "token"} <= extra
+    assert values["config"]["api"]["expose_config"] == "False", "a UI não pode exibir o airflow.cfg"
+
+
+def test_values_template_has_no_literal_secrets():
+    lines = (ROOT / "infra" / "helm" / "airflow-values.yaml.tftpl").read_text().lower().splitlines()
+    code = "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+    for word in ("password:", "secret_key:", "fernetkey:"):
+        assert word not in code, f"'{word}' literal no values do Helm"
+
+
+def test_alert_webhook_url_is_masked(monkeypatch):
+    import importlib
+
+    from airflow.sdk._shared.secrets_masker import redact
+
+    url = "https://hooks.example.com/services/T000/B000/abcdefghijklmnop"
+    monkeypatch.setenv("BANVIC_ALERT_WEBHOOK_URL", url)
+    import banvic.callbacks as callbacks
+
+    importlib.reload(callbacks)
+    assert url not in str(redact(f"falha ao chamar {url}"))
