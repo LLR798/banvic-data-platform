@@ -1,6 +1,6 @@
 [project]
 name = "banvic-data-platform"
-version = "0.1.0"
+version = "0.2.0"
 description = "POC de infraestrutura e pipeline medalhão para o BanVic (Kind + Terraform + Airflow + Meltano + dbt)."
 requires-python = ">=3.12"
 

@@ -1,8 +1,9 @@
 """Entrypoint da imagem banvic/pipeline (executada pelo KubernetesPodOperator).
 
 Subcomandos:
-    bronze  Baixa a partição bronze do MinIO e roda Meltano (tap-csv -> target-postgres)
-            para UMA tabela.
+    bronze  Lê o manifesto PUBLICADO da partição, baixa os arquivos que ele lista e roda
+            Meltano (tap-csv -> target-postgres) para UMA tabela. Nunca lê arquivos que
+            não estejam no manifesto (execuções que falharam no meio ficam invisíveis).
     dbt     Roda `dbt build` para um seletor (tag:silver / tag:gold) e publica os
             artefatos (run_results.json) no lake para auditoria.
 
@@ -65,9 +66,27 @@ def _s3_client():
     )
 
 
-def bronze_key(table: str, ingestion_date: str) -> str:
-    """Caminho canônico de uma tabela na zona bronze do lake."""
-    return f"bronze/{table}/ingestion_date={ingestion_date}/{table}.csv"
+def manifest_key(ingestion_date: str) -> str:
+    """Manifesto da partição: aponta para a versão vigente (mesmo caminho de dags/banvic/config.py)."""
+    return f"bronze/_manifests/ingestion_date={ingestion_date}/manifest.json"
+
+
+def committed_files(manifest: dict) -> dict[str, str]:
+    """Arquivos da versão publicada, um por tabela. Manifesto incompleto = erro (não carrega nada)."""
+    files = manifest.get("files") or {}
+    missing = [t for t in TABLES if t not in files]
+    if missing:
+        raise SystemExit(f"Manifesto sem as tabelas {missing}: partição não publicada por inteiro")
+    return {t: files[t] for t in TABLES}
+
+
+def _read_manifest(s3, bucket: str, ingestion_date: str) -> dict:
+    key = manifest_key(ingestion_date)
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except s3.exceptions.NoSuchKey as exc:
+        raise SystemExit(f"Partição {ingestion_date} não publicada: s3://{bucket}/{key} não existe") from exc
+    return json.loads(body)
 
 
 def _run(cmd: list[str], cwd: Path, extra_env: dict[str, str]) -> int:
@@ -82,18 +101,20 @@ def cmd_bronze(table: str, ingestion_date: str) -> int:
     _require_env("LAKE_BUCKET", "DW_HOST", "DW_DATABASE", "TARGET_POSTGRES_USER", "TARGET_POSTGRES_PASSWORD")
 
     bucket = os.environ["LAKE_BUCKET"]
-    # O nome da pasta local carrega a partição: vira _sdc_source_file na Bronze (linhagem).
-    input_dir = WORK_DIR / f"ingestion_date={ingestion_date}"
+    s3 = _s3_client()
+    manifest = _read_manifest(s3, bucket, ingestion_date)
+    files = committed_files(manifest)
+
+    # O nome da pasta local carrega partição e execução: vira _sdc_source_file na
+    # Bronze (linhagem até a versão exata que foi carregada).
+    input_dir = WORK_DIR / f"ingestion_date={ingestion_date}" / f"run={manifest['run_token']}"
     input_dir.mkdir(parents=True, exist_ok=True)
 
     # O tap-csv faz discovery de todos os arquivos declarados no meltano.yml,
     # então baixamos a partição completa (~4 MB) e carregamos só a tabela pedida.
-    s3 = _s3_client()
-    for name in TABLES:
-        key = bronze_key(name, ingestion_date)
-        target = input_dir / f"{name}.csv"
+    for name, key in files.items():
         log.info("Baixando s3://%s/%s", bucket, key)
-        s3.download_file(bucket, key, str(target))
+        s3.download_file(bucket, key, str(input_dir / f"{name}.csv"))
 
     return _run(
         [MELTANO_BIN, "run", "--no-state-update", "tap-csv", "target-postgres"],

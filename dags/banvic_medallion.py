@@ -7,14 +7,15 @@ Orquestra a ingestão das 7 tabelas do ERP do BanVic (`banvic_data.zip`).
 |---|---|---|
 | `resolve_ingestion_date` | Define a partição do dia (param > logical_date > run_after) | Airflow |
 | `landing.wait_for_landing_file` | Sensor: aguarda o zip do legado no MinIO | Airflow (reschedule) |
-| `landing.landing_to_bronze` | Valida contrato, extrai CSVs para `bronze/` e grava manifesto | Airflow |
+| `landing.landing_to_bronze` | Valida contrato e publica a partição atomicamente (via manifesto) | Airflow |
 | `bronze.load_bronze` | Meltano `tap-csv → target-postgres`, 1 pod por tabela | Pod efêmero |
 | `bronze.bronze_quality` | Contagem lake × DW + auditoria em `ops.pipeline_audit` | Airflow |
 | `silver.dbt_silver` | `dbt build --select tag:silver` (modelos + testes) | Pod efêmero |
 | `gold.dbt_gold` | `dbt build --select tag:gold` (modelos + testes) | Pod efêmero |
 | `gold.audit_layers` | Contagens finais Silver/Gold em `ops.pipeline_audit` | Airflow |
 
-**Idempotência:** reexecutar o mesmo dia sobrescreve a partição do lake,
+**Idempotência:** reexecutar o mesmo dia publica uma nova versão da partição do lake
+(o manifesto passa a apontar para ela; falhas no meio nunca ficam visíveis),
 faz UPSERT por PK na Bronze, recria Silver/Gold (transações: delete+insert por PK)
 e faz UPSERT na auditoria. Nenhuma reexecução duplica dados.
 
@@ -48,6 +49,7 @@ from banvic.callbacks import (
 )
 from banvic.contracts import GOLD_TABLES, SILVER_TABLES, TABLES
 from banvic.landing import LandingValidationError, extract_and_validate
+from banvic.publish import publish_partition
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,24 @@ _DW_URI = "postgres://postgres-dw.data:5432/banvic_dw"
 BRONZE_ASSET = Asset(name="banvic_bronze_transacoes", uri=f"{_DW_URI}/bronze/transacoes")
 SILVER_ASSET = Asset(name="banvic_silver_transacoes", uri=f"{_DW_URI}/silver/transacoes")
 GOLD_ASSET = Asset(name="banvic_gold_mart_cliente_mensal", uri=f"{_DW_URI}/gold/mart_cliente_mensal")
+
+
+class _S3Store:
+    """Adaptador S3Hook -> interface usada por banvic.publish (mantém publish.py testável sem Airflow)."""
+
+    def __init__(self, hook: S3Hook, bucket: str):
+        self.hook, self.bucket = hook, bucket
+
+    def upload_file(self, path: Path, key: str) -> None:
+        self.hook.load_file(filename=str(path), key=key, bucket_name=self.bucket, replace=True)
+
+    def object_size(self, key: str) -> int | None:
+        head = self.hook.head_object(key=key, bucket_name=self.bucket)
+        return None if head is None else int(head["ContentLength"])
+
+    def put_text(self, key: str, text: str) -> None:
+        self.hook.load_string(text, key=key, bucket_name=self.bucket, replace=True)
+
 
 DEFAULT_ARGS = {
     "owner": "data-engineering",
@@ -157,7 +177,12 @@ def banvic_medallion():
 
         @task
         def landing_to_bronze(ingestion_date: str) -> dict:
-            """Valida o zip contra o contrato e publica os CSVs em bronze/ (sobrescreve)."""
+            """Valida o zip contra o contrato e publica a partição Bronze de forma atômica.
+
+            Os CSVs vão para uma área exclusiva desta execução e só passam a valer quando o
+            manifesto do dia é gravado (um único PUT). Falha no meio = manifesto anterior intacto.
+            """
+            run_id = get_current_context()["run_id"]
             hook = S3Hook(aws_conn_id=config.LAKE_CONN_ID)
             with tempfile.TemporaryDirectory() as tmp:
                 local_zip = hook.download_file(
@@ -172,28 +197,17 @@ def banvic_medallion():
                     # Arquivo fora do contrato: retry não resolve -> falha imediata.
                     raise AirflowFailException(str(exc)) from exc
 
-                for table, info in extracted.items():
-                    hook.load_file(
-                        filename=str(info.path),
-                        key=config.bronze_key(table, ingestion_date),
-                        bucket_name=config.LAKE_BUCKET,
-                        replace=True,
-                    )
-                    log.info("bronze/%s: %s linhas (sha256=%s)", table, info.row_count, info.sha256[:12])
+                manifest = publish_partition(
+                    _S3Store(hook, config.LAKE_BUCKET),
+                    ingestion_date=ingestion_date,
+                    run_id=run_id,
+                    source_key=config.landing_key(ingestion_date),
+                    extracted=extracted,
+                )
 
-            manifest = {
-                "ingestion_date": ingestion_date,
-                "source_key": config.landing_key(ingestion_date),
-                "row_counts": {t: i.row_count for t, i in extracted.items()},
-                "sha256": {t: i.sha256 for t, i in extracted.items()},
-                "generated_at": pendulum.now("UTC").isoformat(),
-            }
-            hook.load_string(
-                json.dumps(manifest, indent=2),
-                key=config.manifest_key(ingestion_date),
-                bucket_name=config.LAKE_BUCKET,
-                replace=True,
-            )
+            for table, key in manifest["files"].items():
+                log.info("bronze/%s: %s linhas -> %s", table, manifest["row_counts"][table], key)
+            log.info("Partição %s publicada (run=%s)", ingestion_date, manifest["run_token"])
             return manifest
 
         manifest = landing_to_bronze(ingestion_date)
@@ -223,7 +237,8 @@ def banvic_medallion():
             run_id = get_current_context()["run_id"]
             day = manifest["ingestion_date"]
             hook = PostgresHook(postgres_conn_id=config.DW_CONN_ID)
-            pattern = f"%ingestion_date={day}/%"
+            # Só conta linhas vindas da execução publicada no manifesto (linhagem exata).
+            pattern = f"%ingestion_date={day}/run={manifest['run_token']}/%"
 
             rows = [quality.AuditRow("landing", t, n, None, "ok") for t, n in manifest["row_counts"].items()]
             for table, expected in manifest["row_counts"].items():

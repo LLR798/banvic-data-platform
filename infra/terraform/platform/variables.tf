@@ -18,7 +18,7 @@ variable "airflow_image_repository" {
 
 variable "airflow_image_tag" {
   type    = string
-  default = "0.1.0"
+  default = "0.2.0"
 }
 
 variable "airflow_version" {
@@ -35,7 +35,7 @@ variable "airflow_chart_version" {
 variable "pipeline_image" {
   description = "Imagem Meltano + dbt executada pelos KubernetesPodOperator."
   type        = string
-  default     = "banvic/pipeline:0.1.0"
+  default     = "banvic/pipeline:0.2.0"
 }
 
 variable "postgres_image" {

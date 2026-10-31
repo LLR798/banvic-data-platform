@@ -111,16 +111,16 @@ $ make images
 ```
 
 Faz três coisas: baixa e carrega no Kind as imagens de terceiros (Postgres, MinIO), constrói
-`banvic/airflow:0.1.0` e `banvic/pipeline:0.1.0` **nativas arm64** e as carrega no nó do Kind.
+`banvic/airflow:0.2.0` e `banvic/pipeline:0.2.0` **nativas arm64** e as carrega no nó do Kind.
 Primeira vez: **10–20 min** (depois o cache do Docker deixa rápido).
 
 **✅ Teste**
 
 ```bash
 $ docker images | grep banvic
-$ docker run --rm banvic/pipeline:0.1.0 --help                        # ajuda do runner (bronze | dbt)
-$ docker run --rm --entrypoint /opt/venvs/dbt/bin/dbt banvic/pipeline:0.1.0 --version
-$ docker run --rm banvic/airflow:0.1.0 airflow version                # 3.2.2
+$ docker run --rm banvic/pipeline:0.2.0 --help                        # ajuda do runner (bronze | dbt)
+$ docker run --rm --entrypoint /opt/venvs/dbt/bin/dbt banvic/pipeline:0.2.0 --version
+$ docker run --rm banvic/airflow:0.2.0 airflow version                # 3.2.2
 $ docker exec banvic-control-plane crictl images | grep -E 'banvic|minio|postgres'
 ```
 
@@ -236,7 +236,8 @@ $ export D=2026-10-13
 
 ```bash
 $ ./scripts/stage_bronze_manual.sh $D
-#   s3://banvic-lake/bronze/agencias/ingestion_date=2026-10-13/agencias.csv  (x7)
+#   s3://banvic-lake/bronze/agencias/ingestion_date=2026-10-13/run=manual-.../agencias.csv  (x7)
+#   Partição 2026-10-13 publicada (run=manual-...)   ← o manifesto é gravado por último
 ```
 
 **✅ Teste**: no MinIO Console (http://localhost:9001) → `banvic-lake/bronze/` tem 7 pastas.
@@ -257,7 +258,7 @@ $ alias dw='kubectl -n data exec -it postgres-dw-0 -- psql -U dw_admin -d banvic
 $ dw -c '\d bronze.agencias'
 #  colunas de negócio em text + _sdc_source_file, _sdc_batched_at, ... e "agencias_pkey" PRIMARY KEY
 $ dw -c 'select cod_agencia, nome, _sdc_source_file from bronze.agencias limit 3'
-#  _sdc_source_file = /app/work/ingestion_date=2026-10-13/agencias.csv  ← linhagem da partição
+#  _sdc_source_file = /app/work/ingestion_date=2026-10-13/run=manual-.../agencias.csv  ← partição e execução
 ```
 
 ### 2.3 Carregar as 7 tabelas

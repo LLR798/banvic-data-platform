@@ -4,7 +4,7 @@
 # Executada como pod efêmero pelo KubernetesPodOperator do Airflow.
 #
 # Build (na raiz do repositório):
-#   docker build -f docker/pipeline/Dockerfile -t banvic/pipeline:0.1.0 .
+#   docker build -f docker/pipeline/Dockerfile -t banvic/pipeline:0.2.0 .
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm
 

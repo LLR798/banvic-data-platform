@@ -71,7 +71,7 @@ flowchart LR
 
   subgraph LAKE["MinIO · Data Lake (s3://banvic-lake)"]
     LAND["landing/ingestion_date=D/<br/>banvic_data.zip"]
-    BZF["bronze/&lt;tabela&gt;/ingestion_date=D/<br/>&lt;tabela&gt;.csv + manifest.json"]
+    BZF["bronze/&lt;tabela&gt;/ingestion_date=D/run=R/<br/>&lt;tabela&gt;.csv<br/>+ manifest.json (commit)"]
   end
 
   subgraph DW["PostgreSQL · banvic_dw"]
@@ -96,7 +96,8 @@ resolve_ingestion_date                       param > logical_date > run_after (U
   └─ landing ─────────────────────────────────────────────────────────────────────
        wait_for_landing_file    S3KeySensor (reschedule, backoff, timeout 6h)
        landing_to_bronze        valida contrato do zip (colunas, linhas, sha256),
-                                publica bronze/<tabela>/ingestion_date=D/ + manifesto
+                                grava em bronze/<tabela>/ingestion_date=D/run=R/ e, por último,
+                                o manifesto do dia (commit atômico da partição)
   └─ bronze ──────────────────────────────────────────────────────────────────────
        bronze_pod_arguments     gera 1 conjunto de argumentos por tabela
        load_bronze [x7]         KubernetesPodOperator (dynamic task mapping, máx. 3 em paralelo)
@@ -113,7 +114,7 @@ resolve_ingestion_date                       param > logical_date > run_after (U
 | Camada | Onde | Conteúdo | Quem escreve | Quem lê |
 |---|---|---|---|---|
 | Landing | MinIO `landing/` | O zip exatamente como chegou | Sistema legado (`make seed`) | Airflow |
-| Bronze (lake) | MinIO `bronze/` | CSVs extraídos por partição de data + manifesto (contagens, sha256). Histórico imutável e versionado | Airflow | Meltano |
+| Bronze (lake) | MinIO `bronze/` | CSVs extraídos por data e por execução (`run=R`) + manifesto (arquivos vigentes, contagens, sha256). Só vale o que o manifesto aponta | Airflow | Meltano |
 | Bronze (DW) | `bronze.*` | Espelho fiel da origem (tudo texto) + metadados `_sdc_*` (arquivo/partição de origem, linha, horários de carga) | `svc_ingestion` (Meltano) | dbt, Airflow |
 | Silver | `silver.*` | Tipos reais (`timestamptz`, `numeric(18,2)`), CPF/CEP normalizados, deduplicado, testado | `svc_transform` (dbt) | Engenharia |
 | Gold | `gold.*` | `dim_agencia`, `dim_colaborador`, `dim_cliente`, `fct_transacoes`, `fct_propostas_credito`, `mart_cliente_mensal`. **Sem PII** | `svc_transform` (dbt) | `analyst` (BI) |
@@ -201,7 +202,30 @@ O `banvic_data.zip` simula a exportação diária de um sistema legado. Antes de
 Violação de contrato lança `AirflowFailException`: **não há retry** (reprocessar o mesmo arquivo ruim não
 resolve), e o alerta sai na hora.
 
-### 4.2 Bronze (Meltano)
+### 4.2 Publicação atômica da partição (lake)
+
+Object storage (S3/MinIO) não tem *rename* atômico de vários arquivos: "mover" 7 CSVs é copiar e apagar
+um por um, e uma falha no meio deixaria a partição misturando versões. A POC usa o padrão
+**write-audit-publish**, apoiado no fato de que gravar **um** objeto é atômico:
+
+| Passo | O que acontece | Se falhar aqui |
+|---|---|---|
+| 1. *Write* | Os 7 CSVs vão para a área exclusiva da execução: `bronze/<tabela>/ingestion_date=D/run=<run_id>/` | Nada é lido dessa área; vale a versão anterior |
+| 2. *Audit* | Cada objeto gravado é conferido (existe e tem o tamanho esperado) | Idem: a DAG falha e faz retry |
+| 3. *Publish* | O `manifest.json` do dia é gravado **por último**, num único PUT, listando os arquivos da execução | — (é o commit) |
+
+O runner do Meltano **só lê os arquivos que o manifesto lista** e falha se o manifesto não existir ou
+estiver incompleto. O manifesto funciona como o ponteiro da versão vigente (o mesmo princípio do
+`_delta_log` do Delta Lake). Reprocessar um dia publica uma nova versão; a anterior continua no lake
+(e o bucket é versionado), o que permite *rollback* restaurando o manifesto anterior. Os testes em
+[`tests/test_publish.py`](tests/test_publish.py) simulam a queda da rede no meio da publicação e provam
+que o manifesto não é gravado e a versão anterior continua valendo.
+
+No DW, o mesmo cuidado: a Silver e a Gold só são reconstruídas quando a `bronze_quality` confirma que
+as 7 tabelas da execução publicada chegaram inteiras, e o dbt materializa cada tabela numa tabela
+temporária trocada por *rename* dentro de uma transação. O BI nunca vê uma tabela pela metade.
+
+### 4.3 Bronze (Meltano)
 
 | Decisão | Implementação |
 |---|---|
@@ -209,11 +233,11 @@ resolve), e o alerta sai na hora.
 | Loader | `target-postgres` no schema `bronze`, com `add_record_metadata: true` e `validate_records: true` |
 | Tipos | Tudo **texto** na Bronze (cópia fiel; nada é perdido por conversão). A tipagem é responsabilidade da Silver |
 | Estratégia de carga | **UPSERT por chave primária** (`load_method: upsert`): a origem é um snapshot completo, então a reexecução atualiza em vez de duplicar |
-| Linhagem | `_sdc_source_file` registra a partição do lake (`.../ingestion_date=D/tabela.csv`); `_sdc_batched_at`, `_sdc_extracted_at` registram quando |
+| Linhagem | `_sdc_source_file` registra a partição **e a execução** do lake (`.../ingestion_date=D/run=R/tabela.csv`); `_sdc_batched_at`, `_sdc_extracted_at` registram quando |
 | Paralelismo | 1 pod por tabela (*dynamic task mapping*), máx. 3 simultâneos; falha em `transacoes` reexecuta só `transacoes` |
-| Integridade da carga | `bronze_quality`: linhas carregadas da partição **==** linhas do manifesto, senão a DAG falha |
+| Integridade da carga | `bronze_quality`: linhas carregadas **da execução publicada** == linhas do manifesto, senão a DAG falha |
 
-### 4.3 Silver e Gold (dbt)
+### 4.4 Silver e Gold (dbt)
 
 - **Silver**: um modelo por tabela; `timestamptz` (a origem traz `... UTC` com 0–6 casas decimais),
   `numeric(18,2)` (remove ruído de ponto flutuante), CPF/CEP só dígitos (CEP vinha em 2 formatos),
@@ -234,11 +258,11 @@ resolve), e o alerta sai na hora.
   bootstrap fixa `timezone = America/Sao_Paulo` no banco, e o `make validate` falha se o DW estiver
   com outro fuso.
 
-### 4.4 Idempotência
+### 4.5 Idempotência
 
 | Camada | Mecanismo | Reexecutar o mesmo dia… |
 |---|---|---|
-| Landing/Bronze (lake) | Sobrescreve o prefixo `ingestion_date=D` (bucket versionado guarda as versões) | … gera o mesmo conteúdo |
+| Landing/Bronze (lake) | Nova versão em `run=R` + troca atômica do manifesto (a anterior é preservada) | … publica o mesmo conteúdo, sem estado intermediário visível |
 | Bronze (DW) | UPSERT por PK | … não duplica linhas |
 | Silver | `table` (recriada) e `incremental delete+insert` por PK | … não duplica linhas |
 | Gold | `table` (recriada) | … recalcula |

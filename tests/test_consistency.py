@@ -7,6 +7,7 @@ import re
 
 import yaml
 
+from banvic import config
 from banvic.contracts import CONTRACTS, GOLD_TABLES, TABLES
 from banvic.quality import count_sql, qualified
 from conftest import ROOT
@@ -45,7 +46,7 @@ def test_meltano_has_no_inline_credentials():
 def test_runner_tables_match_contract():
     runner = _load_runner()
     assert tuple(runner.TABLES) == TABLES
-    assert runner.bronze_key("contas", "2026-10-13") == "bronze/contas/ingestion_date=2026-10-13/contas.csv"
+    assert runner.manifest_key("2026-10-13") == config.manifest_key("2026-10-13")
 
 
 def test_dbt_has_silver_model_for_each_table_and_gold_models():
