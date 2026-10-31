@@ -55,6 +55,8 @@ jobs:
         run: |
           make trigger INGESTION_DATE=${{ env.INGESTION_DATE }}
           make validate
+      - name: Auditoria (logs persistentes, menor privilégio, nenhum segredo nos logs)
+        run: make audit
       - name: Diagnóstico em caso de falha
         if: failure()
         run: |

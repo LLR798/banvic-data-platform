@@ -3,7 +3,7 @@
 # Imagem "banvic/airflow": Airflow oficial + providers fixados + DAGs embutidas.
 #
 # Build (na raiz do repositório):
-#   docker build -f docker/airflow/Dockerfile -t banvic/airflow:0.1.0 .
+#   docker build -f docker/airflow/Dockerfile -t banvic/airflow:0.2.0 .
 # -----------------------------------------------------------------------------
 ARG AIRFLOW_VERSION=3.2.2
 ARG PYTHON_VERSION=3.12

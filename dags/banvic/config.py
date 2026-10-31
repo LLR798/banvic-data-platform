@@ -9,6 +9,7 @@ AIRFLOW_CONN_* a partir de Kubernetes Secrets.
 from __future__ import annotations
 
 import os
+import re
 
 # Conexões Airflow (definidas via env AIRFLOW_CONN_LAKE_S3 / AIRFLOW_CONN_DW_POSTGRES)
 LAKE_CONN_ID = "lake_s3"
@@ -19,7 +20,7 @@ LAKE_BUCKET = os.getenv("BANVIC_LAKE_BUCKET", "banvic-lake")
 LANDING_FILE_NAME = "banvic_data.zip"
 
 # Execução dos jobs (pods efêmeros)
-PIPELINE_IMAGE = os.getenv("BANVIC_PIPELINE_IMAGE", "banvic/pipeline:0.1.0")
+PIPELINE_IMAGE = os.getenv("BANVIC_PIPELINE_IMAGE", "banvic/pipeline:0.2.0")
 JOBS_NAMESPACE = os.getenv("BANVIC_JOBS_NAMESPACE", "airflow")
 PIPELINE_CONFIGMAP = "pipeline-config"
 LAKE_SECRET = "lake-credentials"
@@ -35,11 +36,16 @@ def landing_key(ingestion_date: str) -> str:
     return f"landing/ingestion_date={ingestion_date}/{LANDING_FILE_NAME}"
 
 
-def bronze_key(table: str, ingestion_date: str) -> str:
-    """Partição imutável de uma tabela na zona bronze do lake."""
-    return f"bronze/{table}/ingestion_date={ingestion_date}/{table}.csv"
+def run_token(run_id: str) -> str:
+    """Identificador da execução seguro para usar em caminhos do lake."""
+    return re.sub(r"[^A-Za-z0-9.-]+", "-", run_id).strip("-")
+
+
+def bronze_key(table: str, ingestion_date: str, token: str) -> str:
+    """Arquivo de uma tabela na área da execução (só fica visível quando o manifesto aponta para ele)."""
+    return f"bronze/{table}/ingestion_date={ingestion_date}/run={token}/{table}.csv"
 
 
 def manifest_key(ingestion_date: str) -> str:
-    """Manifesto (contagens + checksums) da partição bronze do dia."""
+    """Manifesto da partição: o "commit" que diz qual execução é a versão vigente do dia."""
     return f"bronze/_manifests/ingestion_date={ingestion_date}/manifest.json"

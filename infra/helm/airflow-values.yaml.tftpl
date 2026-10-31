@@ -47,6 +47,9 @@ secret:
   - envName: AIRFLOW_CONN_DW_POSTGRES
     secretName: ${connections_secret}
     secretKey: AIRFLOW_CONN_DW_POSTGRES
+  - envName: AIRFLOW_CONN_LOGS_S3
+    secretName: ${connections_secret}
+    secretKey: AIRFLOW_CONN_LOGS_S3
 
 # Configuração não sensível consumida pelas DAGs (dags/banvic/config.py).
 env:
@@ -69,9 +72,24 @@ config:
     load_examples: "False"
     # DAGs nascem pausadas (padrão seguro); `make trigger` faz o unpause.
     dags_are_paused_at_creation: "True"
+    # Mascaramento: valores de campos com estes nomes (em Variables, extras de
+    # conexões e logs) aparecem como *** na UI e nos logs das tarefas.
+    hide_sensitive_var_conn_fields: "True"
+    sensitive_var_conn_names: "secret_key,secret_access_key,aws_secret_access_key,token,webhook,fernet,jwt,dsn"
+  api:
+    # A página de configuração da UI fica desligada: ela não expõe nada do airflow.cfg.
+    expose_config: "False"
   dag_processor:
     # Intervalo (s) para descobrir arquivos novos na pasta de DAGs.
     refresh_interval: 30
+  # Logs das tarefas (inclusive a saída dos pods Meltano/dbt) vão para um bucket
+  # dedicado no MinIO ao fim de cada tentativa: sobrevivem a reinícios de pods e
+  # à perda do volume local. O PVC do scheduler continua como cópia local/buffer.
+  logging:
+    remote_logging: "True"
+    remote_base_log_folder: "s3://${logs_bucket}/airflow"
+    remote_log_conn_id: "logs_s3"
+    delete_local_logs: "False"
 
 # Com Terraform (helm --wait) os jobs NÃO podem ser hooks pós-instalação,
 # senão o helm espera pods que esperam a migração (deadlock).

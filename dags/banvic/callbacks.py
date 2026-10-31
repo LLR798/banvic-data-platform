@@ -13,7 +13,20 @@ import os
 import urllib.request
 from typing import Any
 
+from airflow.sdk.log import mask_secret
+
 log = logging.getLogger("banvic.alerts")
+
+
+def _webhook_url() -> str | None:
+    """URL do webhook (é uma credencial: quem tem a URL posta no canal). Sempre mascarada."""
+    url = os.getenv("BANVIC_ALERT_WEBHOOK_URL")
+    if url:
+        mask_secret(url, name="BANVIC_ALERT_WEBHOOK_URL")
+    return url
+
+
+_webhook_url()
 
 
 def _payload(context: dict[str, Any], event: str) -> dict[str, Any]:
@@ -31,7 +44,7 @@ def _payload(context: dict[str, Any], event: str) -> dict[str, Any]:
 
 
 def _send(payload: dict[str, Any]) -> None:
-    url = os.getenv("BANVIC_ALERT_WEBHOOK_URL")
+    url = _webhook_url()
     if not url:
         return
     body = json.dumps({"text": f"[BanVic] {payload['event']}: {json.dumps(payload, default=str)}"})

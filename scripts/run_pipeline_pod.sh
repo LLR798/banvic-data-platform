@@ -9,7 +9,7 @@ set -euo pipefail
 
 [ $# -ge 1 ] || { sed -n 2,9p "$0"; exit 1; }
 
-IMAGE="${PIPELINE_IMAGE:-banvic/pipeline:0.1.0}"
+IMAGE="${PIPELINE_IMAGE:-banvic/pipeline:0.2.0}"
 NS=airflow
 case "$1" in
   bronze) DB_SECRET=dw-ingestion-credentials ;;

@@ -6,3 +6,7 @@ output "endpoint" {
 output "bucket" {
   value = var.bucket
 }
+
+output "logs_bucket" {
+  value = var.logs_bucket
+}

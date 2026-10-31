@@ -21,6 +21,25 @@ centralizado por analistas e ferramentas de BI.
 
 ---
 
+## 0. O problema do BanVic e como esta POC responde
+
+Hoje as análises do BanVic são feitas à mão, em planilhas, a partir de cópias do ERP. A CEO quer decidir
+com dados; a Diretoria Comercial precisa **aumentar as transações por cliente e reduzir o churn**, mas é
+cética e detém parte dos dados comerciais, o que costuma travar acessos. A POC foi desenhada a partir
+dessas dores:
+
+| Dor / meta (quem) | O que a POC entrega | Onde está | Limitação e próximo passo |
+|---|---|---|---|
+| Análises manuais e arriscadas (André, TI) | Pipeline automático e diário, reprodutível do zero com `make up`, com auditoria de cada execução e logs persistidos | Terraform, Airflow, `ops.pipeline_audit`, bucket de logs | Lote diário; nó único (sem alta disponibilidade) |
+| Mais transações por cliente e menos churn (Camila, Comercial) | `gold.mart_cliente_mensal`: cliente × mês com transações, janela de 3 meses, recência e status (`ativo`, `risco_churn`...), pronta para o Power BI | dbt Gold, seção 9 | O dashboard em si não faz parte da POC; a Gold é a base dele |
+| Ceticismo e confiança nos números (Camila) | Reconciliação automática origem → Bronze → Silver, 64 testes dbt, problema real da origem exposto e tratado (cliente 528) | `make validate`, testes dbt | Regras de negócio validadas com o time comercial seriam a próxima rodada |
+| Dados comerciais sensíveis e acessos burocráticos (Comercial, LGPD) | Acesso por camada: o analista só lê a Gold, sem dados pessoais; cada job tem credencial própria. Liberar acesso vira uma permissão no banco, não uma cópia de planilha | Roles do DW, seção 6 | CRM e marketing não vieram no zip: quando entrarem, seguem o mesmo modelo de permissões |
+| Piloto em crédito (Lucas, Dados) | `gold.fct_propostas_credito` (2.000 propostas) ligada a clientes, agências e colaboradores | dbt Gold | A análise de crédito em si é o passo seguinte do piloto |
+| Ranking das alavancas que movem o ponteiro (Sofia, CEO) | Base pronta: fatos e dimensões no grão cliente × mês | Gold | **Não entregue**: exige uma etapa analítica (modelo estatístico sobre a Gold), fora do escopo de engenharia desta POC |
+| Piloto com custo e risco baixos | 100% local, custo de nuvem zero; o mesmo código migra para a AWS sem reescrita | Seção 10 | Serviços gerenciados (IAM, rede) só se validam num ambiente de staging |
+
+---
+
 ## 1. Arquitetura
 
 ### 1.1 Infraestrutura
@@ -35,7 +54,7 @@ flowchart TB
 
   subgraph KIND["Cluster Kubernetes local · Kind 'banvic'"]
     subgraph NSD["namespace: data"]
-      MINIO[("MinIO<br/>bucket banvic-lake<br/>(versionado, privado)")]
+      MINIO[("MinIO<br/>banvic-lake (versionado)<br/>banvic-airflow-logs (retenção 30 d)")]
       DW[("PostgreSQL 17<br/>banvic_dw<br/>bronze · silver · gold · ops")]
     end
     subgraph NSA["namespace: airflow"]
@@ -53,7 +72,7 @@ flowchart TB
   MK --> TF --> KIND
   ZIP -- "make seed (API S3 :9000)" --> MINIO
   SCH -- "KubernetesPodOperator" --> POD
-  SCH -- "sensor, validação, auditoria" --> MINIO
+  SCH -- "sensor, validação, auditoria,<br/>logs das tarefas" --> MINIO
   SCH --> DW
   POD --> MINIO
   POD --> DW
@@ -71,7 +90,7 @@ flowchart LR
 
   subgraph LAKE["MinIO · Data Lake (s3://banvic-lake)"]
     LAND["landing/ingestion_date=D/<br/>banvic_data.zip"]
-    BZF["bronze/&lt;tabela&gt;/ingestion_date=D/<br/>&lt;tabela&gt;.csv + manifest.json"]
+    BZF["bronze/&lt;tabela&gt;/ingestion_date=D/run=R/<br/>&lt;tabela&gt;.csv<br/>+ manifest.json (commit)"]
   end
 
   subgraph DW["PostgreSQL · banvic_dw"]
@@ -96,7 +115,8 @@ resolve_ingestion_date                       param > logical_date > run_after (U
   └─ landing ─────────────────────────────────────────────────────────────────────
        wait_for_landing_file    S3KeySensor (reschedule, backoff, timeout 6h)
        landing_to_bronze        valida contrato do zip (colunas, linhas, sha256),
-                                publica bronze/<tabela>/ingestion_date=D/ + manifesto
+                                grava em bronze/<tabela>/ingestion_date=D/run=R/ e, por último,
+                                o manifesto do dia (commit atômico da partição)
   └─ bronze ──────────────────────────────────────────────────────────────────────
        bronze_pod_arguments     gera 1 conjunto de argumentos por tabela
        load_bronze [x7]         KubernetesPodOperator (dynamic task mapping, máx. 3 em paralelo)
@@ -113,7 +133,7 @@ resolve_ingestion_date                       param > logical_date > run_after (U
 | Camada | Onde | Conteúdo | Quem escreve | Quem lê |
 |---|---|---|---|---|
 | Landing | MinIO `landing/` | O zip exatamente como chegou | Sistema legado (`make seed`) | Airflow |
-| Bronze (lake) | MinIO `bronze/` | CSVs extraídos por partição de data + manifesto (contagens, sha256). Histórico imutável e versionado | Airflow | Meltano |
+| Bronze (lake) | MinIO `bronze/` | CSVs extraídos por data e por execução (`run=R`) + manifesto (arquivos vigentes, contagens, sha256). Só vale o que o manifesto aponta | Airflow | Meltano |
 | Bronze (DW) | `bronze.*` | Espelho fiel da origem (tudo texto) + metadados `_sdc_*` (arquivo/partição de origem, linha, horários de carga) | `svc_ingestion` (Meltano) | dbt, Airflow |
 | Silver | `silver.*` | Tipos reais (`timestamptz`, `numeric(18,2)`), CPF/CEP normalizados, deduplicado, testado | `svc_transform` (dbt) | Engenharia |
 | Gold | `gold.*` | `dim_agencia`, `dim_colaborador`, `dim_cliente`, `fct_transacoes`, `fct_propostas_credito`, `mart_cliente_mensal`. **Sem PII** | `svc_transform` (dbt) | `analyst` (BI) |
@@ -201,7 +221,30 @@ O `banvic_data.zip` simula a exportação diária de um sistema legado. Antes de
 Violação de contrato lança `AirflowFailException`: **não há retry** (reprocessar o mesmo arquivo ruim não
 resolve), e o alerta sai na hora.
 
-### 4.2 Bronze (Meltano)
+### 4.2 Publicação atômica da partição (lake)
+
+Object storage (S3/MinIO) não tem *rename* atômico de vários arquivos: "mover" 7 CSVs é copiar e apagar
+um por um, e uma falha no meio deixaria a partição misturando versões. A POC usa o padrão
+**write-audit-publish**, apoiado no fato de que gravar **um** objeto é atômico:
+
+| Passo | O que acontece | Se falhar aqui |
+|---|---|---|
+| 1. *Write* | Os 7 CSVs vão para a área exclusiva da execução: `bronze/<tabela>/ingestion_date=D/run=<run_id>/` | Nada é lido dessa área; vale a versão anterior |
+| 2. *Audit* | Cada objeto gravado é conferido (existe e tem o tamanho esperado) | Idem: a DAG falha e faz retry |
+| 3. *Publish* | O `manifest.json` do dia é gravado **por último**, num único PUT, listando os arquivos da execução | — (é o commit) |
+
+O runner do Meltano **só lê os arquivos que o manifesto lista** e falha se o manifesto não existir ou
+estiver incompleto. O manifesto funciona como o ponteiro da versão vigente (o mesmo princípio do
+`_delta_log` do Delta Lake). Reprocessar um dia publica uma nova versão; a anterior continua no lake
+(e o bucket é versionado), o que permite *rollback* restaurando o manifesto anterior. Os testes em
+[`tests/test_publish.py`](tests/test_publish.py) simulam a queda da rede no meio da publicação e provam
+que o manifesto não é gravado e a versão anterior continua valendo.
+
+No DW, o mesmo cuidado: a Silver e a Gold só são reconstruídas quando a `bronze_quality` confirma que
+as 7 tabelas da execução publicada chegaram inteiras, e o dbt materializa cada tabela numa tabela
+temporária trocada por *rename* dentro de uma transação. O BI nunca vê uma tabela pela metade.
+
+### 4.3 Bronze (Meltano)
 
 | Decisão | Implementação |
 |---|---|
@@ -209,11 +252,11 @@ resolve), e o alerta sai na hora.
 | Loader | `target-postgres` no schema `bronze`, com `add_record_metadata: true` e `validate_records: true` |
 | Tipos | Tudo **texto** na Bronze (cópia fiel; nada é perdido por conversão). A tipagem é responsabilidade da Silver |
 | Estratégia de carga | **UPSERT por chave primária** (`load_method: upsert`): a origem é um snapshot completo, então a reexecução atualiza em vez de duplicar |
-| Linhagem | `_sdc_source_file` registra a partição do lake (`.../ingestion_date=D/tabela.csv`); `_sdc_batched_at`, `_sdc_extracted_at` registram quando |
+| Linhagem | `_sdc_source_file` registra a partição **e a execução** do lake (`.../ingestion_date=D/run=R/tabela.csv`); `_sdc_batched_at`, `_sdc_extracted_at` registram quando |
 | Paralelismo | 1 pod por tabela (*dynamic task mapping*), máx. 3 simultâneos; falha em `transacoes` reexecuta só `transacoes` |
-| Integridade da carga | `bronze_quality`: linhas carregadas da partição **==** linhas do manifesto, senão a DAG falha |
+| Integridade da carga | `bronze_quality`: linhas carregadas **da execução publicada** == linhas do manifesto, senão a DAG falha |
 
-### 4.3 Silver e Gold (dbt)
+### 4.4 Silver e Gold (dbt)
 
 - **Silver**: um modelo por tabela; `timestamptz` (a origem traz `... UTC` com 0–6 casas decimais),
   `numeric(18,2)` (remove ruído de ponto flutuante), CPF/CEP só dígitos (CEP vinha em 2 formatos),
@@ -234,11 +277,11 @@ resolve), e o alerta sai na hora.
   bootstrap fixa `timezone = America/Sao_Paulo` no banco, e o `make validate` falha se o DW estiver
   com outro fuso.
 
-### 4.4 Idempotência
+### 4.5 Idempotência
 
 | Camada | Mecanismo | Reexecutar o mesmo dia… |
 |---|---|---|
-| Landing/Bronze (lake) | Sobrescreve o prefixo `ingestion_date=D` (bucket versionado guarda as versões) | … gera o mesmo conteúdo |
+| Landing/Bronze (lake) | Nova versão em `run=R` + troca atômica do manifesto (a anterior é preservada) | … publica o mesmo conteúdo, sem estado intermediário visível |
 | Bronze (DW) | UPSERT por PK | … não duplica linhas |
 | Silver | `table` (recriada) e `incremental delete+insert` por PK | … não duplica linhas |
 | Gold | `table` (recriada) | … recalcula |
@@ -261,6 +304,12 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
   `BANVIC_ALERT_WEBHOOK_URL` estiver definido (Slack/Teams via Secret), o alerta também é enviado.
 - **Pods**: sucesso → removido; falha → mantido para inspeção (`on_finish_action="delete_succeeded_pod"`),
   com eventos do Kubernetes anexados ao log.
+- **Logs persistentes (remote logging)**: ao fim de cada tentativa, o log da task, incluindo a saída
+  completa dos pods Meltano/dbt, é enviado para o bucket dedicado `s3://banvic-airflow-logs/airflow/`.
+  Os logs sobrevivem a reinícios de pods e à perda do volume local, e a UI do Airflow lê de lá. O bucket
+  tem usuário próprio (`svc-airflow-logs`: lê e grava, **não apaga**, sem acesso ao lake) e regra de
+  ciclo de vida de 30 dias. Logs dos componentes (scheduler, API) vão para o stdout do pod, padrão do
+  Kubernetes; em produção, um coletor (Fluent Bit → CloudWatch) os centraliza.
 - **Observabilidade de dados**: `ops.pipeline_audit` (contagem por camada a cada execução),
   `manifest.json` no lake e `run_results.json` do dbt publicados em `s3://banvic-lake/ops/dbt_artifacts/`.
 - **Assets do Airflow 3**: as tasks de carga declaram `outlets`, criando linhagem na UI e permitindo
@@ -275,11 +324,15 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 | Nenhuma credencial no código | Senhas geradas por `random_password` no Terraform → Kubernetes Secrets → `envFrom`/`AIRFLOW_CONN_*`. `meltano.yml`, `profiles.yml`, DAGs e values do Helm só referenciam **nomes** de Secrets/variáveis. O CI roda **Trivy** para detectar segredos commitados |
 | Menor privilégio no DW | 4 roles: `svc_ingestion` (escreve Bronze), `svc_transform` (lê Bronze, escreve Silver/Gold), `svc_orchestrator` (lê tudo, escreve `ops`), `analyst` (lê **só a Gold**). `make validate` comprova que `analyst` é bloqueado na Silver |
 | Menor privilégio no lake | Aplicações usam o usuário `svc-pipeline` com política restrita ao bucket; a credencial root do MinIO só é usada pelo Job de setup. Bucket privado e versionado |
+| Logs de auditoria | Bucket separado (`banvic-airflow-logs`) com usuário próprio que grava mas não apaga; o pipeline não enxerga os logs e o Airflow não enxerga o lake com essa credencial |
 | Credencial por job | Pod de Bronze recebe só a senha de `svc_ingestion`; pods dbt só a de `svc_transform` |
 | LGPD / PII | CPF, e-mail e endereço ficam na Silver (acesso de engenharia). A Gold não tem PII |
 | Rede | Portas expostas apenas em `127.0.0.1` (não acessíveis pela rede local) |
 | Containers | Pods do pipeline rodam como não-root (UID 10001), sem escalonamento de privilégio e com `capabilities: drop ALL` |
 | Supply chain | Imagens com versões fixadas (nó do Kind e MinIO por **digest**); MinIO de fonte mantida (Chainguard) após a remoção das imagens oficiais; GitHub Actions fixadas por **SHA** de commit |
+| Mascaramento na UI e nos logs | Conexões vêm de `AIRFLOW_CONN_*` (Secrets): não ficam no banco do Airflow nem aparecem em *Admin → Connections*. `hide_sensitive_var_conn_fields` + `sensitive_var_conn_names` exibem como `***` qualquer campo sensível em Variables, extras de conexão e logs; `expose_config = False` tira o `airflow.cfg` da UI; a URL do webhook de alertas é registrada no mascarador. Os pods do pipeline recebem segredos por `envFrom`, então a UI (*Rendered Template*, *K8s Pod Spec*) só mostra **nomes** de Secrets |
+| Prova automática | `make audit` (também no E2E) procura **cada** valor de segredo do cluster em todos os logs de tarefas e de componentes: o resultado esperado é 0 ocorrências. Também confere o mascaramento e o isolamento entre os usuários do lake e dos logs |
+| Senhas no terminal | `make credentials` mostra as senhas **mascaradas** por padrão (`SHOW=1` exibe; `COPY=airflow` copia para a área de transferência sem exibir), seguro para gravar a tela |
 | Estado do Terraform | `terraform.tfstate` contém as senhas: fica local e está no `.gitignore` (em produção: backend S3 criptografado) |
 
 ---
@@ -290,7 +343,7 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | push/PR | **lint** (ruff, yamllint) · **dag-tests** (DagBag sem erros, dependências na ordem do medalhão, sem ciclos, retries/backoff/callbacks, credenciais só via Secrets) · **data-pipeline** (bootstrap do DW + Meltano + dbt contra um Postgres real, 2× para provar idempotência, + `validate.sql`) · **terraform** (fmt, validate, tflint) · **k8s-manifests** (`helm template` do Airflow com nossos values → `kubeconform`) · **security** (Trivy secret scan) |
 | [`build-images.yml`](.github/workflows/build-images.yml) | mudanças em código/Dockerfiles | Build **multi-arch** (amd64 + arm64) das imagens Airflow e pipeline; em `main`/tags publica no GHCR |
-| [`e2e-kind.yml`](.github/workflows/e2e-kind.yml) | PR para `main` / manual | Sobe a stack inteira **do zero** num Kind efêmero no runner com `make up`, roda `make demo`, reexecuta (idempotência), coleta diagnóstico se falhar e destrói |
+| [`e2e-kind.yml`](.github/workflows/e2e-kind.yml) | PR para `main` / manual | Sobe a stack inteira **do zero** num Kind efêmero no runner com `make up`, roda `make demo`, reexecuta (idempotência), roda `make audit` (logs persistidos, nenhum segredo nos logs), coleta diagnóstico se falhar e destrói |
 
 - **Proteção do `main`:** um *ruleset* exige os 6 jobs do `ci.yml` verdes para qualquer merge (push direto
   bloqueado; só o administrador pode fazer *bypass*, de forma explícita). O E2E e o build de imagens não
@@ -446,6 +499,13 @@ Athena, mantendo o dbt como camada de transformação.
 ## 12. Limitações conhecidas (escopo de POC)
 
 - Cluster de 1 nó e Postgres single-instance (sem HA); backup do DW não automatizado.
+- Os Secrets do Kubernetes ficam em base64 no etcd do Kind, sem criptografia em repouso. Em produção:
+  EKS com criptografia de Secrets por KMS e os valores vindos do AWS Secrets Manager (External Secrets).
+- Com `max_active_runs=1`, a execução agendada do dia roda antes de qualquer reprocessamento manual e
+  espera o arquivo de hoje no sensor. Por isso o E2E usa a data de hoje (UTC); um E2E iniciado perto da
+  meia-noite UTC (≈21h em Brasília) pode ficar preso. Evolução: uma DAG separada para reprocessamentos.
+- Execuções que falham no meio da publicação deixam arquivos órfãos em `run=<id>/` (nunca lidos). Uma
+  limpeza periódica (como o `VACUUM` do Delta Lake) é a evolução natural.
 - MinIO: imagens oficiais removidas pelo fornecedor; usamos a build da Chainguard (ver nota na seção 2).
 - Alertas externos dependem de configurar `BANVIC_ALERT_WEBHOOK_URL`.
 - Períodos parciais (2010 e 2023) são sinalizados no relatório de validação, mas ainda não no modelo:
