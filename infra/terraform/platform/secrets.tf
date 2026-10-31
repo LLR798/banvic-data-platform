@@ -18,10 +18,12 @@ locals {
     "airflow_admin",
     "minio_root",
     "minio_pipeline",
+    "minio_logs",
   ])
 
   dw_host      = "postgres-dw.${kubernetes_namespace_v1.data.metadata[0].name}.svc.cluster.local"
   minio_access = "svc-pipeline"
+  logs_access  = "svc-airflow-logs"
 }
 
 resource "random_password" "this" {
@@ -73,6 +75,8 @@ resource "kubernetes_secret_v1" "minio" {
     MINIO_ROOT_PASSWORD = random_password.this["minio_root"].result
     PIPELINE_ACCESS_KEY = local.minio_access
     PIPELINE_SECRET_KEY = random_password.this["minio_pipeline"].result
+    LOGS_ACCESS_KEY     = local.logs_access
+    LOGS_SECRET_KEY     = random_password.this["minio_logs"].result
   }
 }
 
@@ -144,6 +148,16 @@ resource "kubernetes_secret_v1" "airflow_connections" {
       conn_type = "aws"
       login     = local.minio_access
       password  = random_password.this["minio_pipeline"].result
+      extra = {
+        endpoint_url = module.minio.endpoint
+        region_name  = "us-east-1"
+      }
+    })
+    # Remote logging: usuário próprio, que só enxerga o bucket de logs.
+    AIRFLOW_CONN_LOGS_S3 = jsonencode({
+      conn_type = "aws"
+      login     = local.logs_access
+      password  = random_password.this["minio_logs"].result
       extra = {
         endpoint_url = module.minio.endpoint
         region_name  = "us-east-1"

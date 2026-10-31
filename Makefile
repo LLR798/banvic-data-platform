@@ -36,7 +36,7 @@ up: check cluster images platform ## Sobe o ambiente completo do zero
 	@echo "  Rodar o pipeline:         make demo"
 
 cluster: ## [Fase 1] Cria o cluster Kind via Terraform
-	$(TF) -chdir=$(TF_CLUSTER) init -input=false -upgrade
+	$(TF) -chdir=$(TF_CLUSTER) init -input=false
 	$(TF) -chdir=$(TF_CLUSTER) apply -input=false -auto-approve
 	kubectl config use-context $(CONTEXT)
 	kubectl get nodes -o wide
@@ -50,7 +50,7 @@ preload: ## Carrega imagens de terceiros (Postgres, MinIO) no Kind
 	CLUSTER=$(CLUSTER) ./scripts/load_images.sh
 
 platform: ## [Fase 1] Provisiona MinIO, Postgres, Secrets e Airflow via Terraform
-	$(TF) -chdir=$(TF_PLATFORM) init -input=false -upgrade
+	$(TF) -chdir=$(TF_PLATFORM) init -input=false
 	$(TF) -chdir=$(TF_PLATFORM) apply -input=false -auto-approve \
 		-var="kube_context=$(CONTEXT)" \
 		-var="airflow_image_tag=$(VERSION)" \

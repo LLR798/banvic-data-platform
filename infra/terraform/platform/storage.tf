@@ -5,6 +5,7 @@ module "minio" {
   namespace               = kubernetes_namespace_v1.data.metadata[0].name
   credentials_secret_name = kubernetes_secret_v1.minio.metadata[0].name
   bucket                  = var.lake_bucket
+  logs_bucket             = var.logs_bucket
   api_node_port           = var.node_ports.minio_api
   console_node_port       = var.node_ports.minio_console
 }

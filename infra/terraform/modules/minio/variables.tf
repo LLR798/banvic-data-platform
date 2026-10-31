@@ -34,13 +34,24 @@ variable "run_as_uid" {
 }
 
 variable "credentials_secret_name" {
-  description = "Secret com MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, PIPELINE_ACCESS_KEY e PIPELINE_SECRET_KEY."
+  description = "Secret com MINIO_ROOT_USER/PASSWORD, PIPELINE_ACCESS_KEY/SECRET_KEY e LOGS_ACCESS_KEY/SECRET_KEY."
   type        = string
 }
 
 variable "bucket" {
   description = "Bucket do data lake (prefixos landing/, bronze/, ops/)."
   type        = string
+}
+
+variable "logs_bucket" {
+  description = "Bucket dos logs de tarefas do Airflow (remote logging), separado do data lake."
+  type        = string
+}
+
+variable "logs_retention_days" {
+  description = "Dias até os logs expirarem (regra de ciclo de vida do bucket)."
+  type        = number
+  default     = 30
 }
 
 variable "storage_size" {

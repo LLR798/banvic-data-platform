@@ -1,8 +1,10 @@
 # -----------------------------------------------------------------------------
 # Módulo: MinIO (Data Lake S3-compatível) + Job de configuração.
 #
-# O Job cria o bucket (com versionamento) e um usuário de serviço com política
-# restrita a esse bucket. As aplicações NUNCA usam a credencial root.
+# O Job cria dois buckets, cada um com um usuário de serviço próprio:
+#   - <bucket>       data lake (versionado)        -> usuário do pipeline
+#   - <logs_bucket>  logs de tarefas do Airflow    -> usuário só de logs
+# Cada política dá acesso a UM bucket. As aplicações NUNCA usam a credencial root.
 # -----------------------------------------------------------------------------
 locals {
   labels = {
@@ -191,6 +193,33 @@ resource "kubernetes_config_map_v1" "setup" {
       ]
     })
 
+    # Logs: lê e grava, mas não apaga (trilha de auditoria). Sem acesso ao lake.
+    "logs-policy.json" = jsonencode({
+      Version = "2012-10-17"
+      Statement = [
+        {
+          Effect   = "Allow"
+          Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
+          Resource = ["arn:aws:s3:::${var.logs_bucket}"]
+        },
+        {
+          Effect   = "Allow"
+          Action   = ["s3:GetObject", "s3:PutObject"]
+          Resource = ["arn:aws:s3:::${var.logs_bucket}/*"]
+        },
+      ]
+    })
+
+    # Retenção dos logs: expiram após N dias (import substitui a regra: idempotente).
+    "logs-lifecycle.json" = jsonencode({
+      Rules = [{
+        ID         = "expira-logs-airflow"
+        Status     = "Enabled"
+        Filter     = { Prefix = "" }
+        Expiration = { Days = var.logs_retention_days }
+      }]
+    })
+
     "setup.sh" = <<-EOT
       #!/bin/sh
       # Idempotente: pode rodar quantas vezes for preciso.
@@ -206,6 +235,16 @@ resource "kubernetes_config_map_v1" "setup" {
       mc admin policy attach lake banvic-pipeline --user "$PIPELINE_ACCESS_KEY" 2>&1 \
         | grep -v -i "already" || true
       echo "Bucket ${var.bucket} pronto (versionado, privado) e usuário de serviço configurado."
+
+      # Logs persistentes do Airflow (remote logging).
+      mc mb --ignore-existing "lake/${var.logs_bucket}"
+      mc anonymous set none "lake/${var.logs_bucket}"
+      mc ilm import "lake/${var.logs_bucket}" < /setup/logs-lifecycle.json
+      mc admin policy create lake banvic-airflow-logs /setup/logs-policy.json
+      mc admin user add lake "$LOGS_ACCESS_KEY" "$LOGS_SECRET_KEY"
+      mc admin policy attach lake banvic-airflow-logs --user "$LOGS_ACCESS_KEY" 2>&1 \
+        | grep -v -i "already" || true
+      echo "Bucket ${var.logs_bucket} pronto (privado, retenção de ${var.logs_retention_days} dias)."
     EOT
   }
 }

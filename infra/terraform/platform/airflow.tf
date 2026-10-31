@@ -38,6 +38,7 @@ resource "helm_release" "airflow" {
       pipeline_image           = var.pipeline_image
       jobs_namespace           = kubernetes_namespace_v1.airflow.metadata[0].name
       lake_bucket              = var.lake_bucket
+      logs_bucket              = module.minio.logs_bucket
       metadata_secret          = kubernetes_secret_v1.airflow_metadata.metadata[0].name
       fernet_secret            = kubernetes_secret_v1.airflow_fernet.metadata[0].name
       api_secret               = kubernetes_secret_v1.airflow_api_secret.metadata[0].name

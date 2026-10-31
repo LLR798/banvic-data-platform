@@ -49,6 +49,12 @@ variable "lake_bucket" {
   default = "banvic-lake"
 }
 
+variable "logs_bucket" {
+  description = "Bucket dos logs de tarefas do Airflow (separado do lake: outro dono, outra retenção)."
+  type        = string
+  default     = "banvic-airflow-logs"
+}
+
 variable "dw_database" {
   type    = string
   default = "banvic_dw"

@@ -35,7 +35,7 @@ flowchart TB
 
   subgraph KIND["Cluster Kubernetes local · Kind 'banvic'"]
     subgraph NSD["namespace: data"]
-      MINIO[("MinIO<br/>bucket banvic-lake<br/>(versionado, privado)")]
+      MINIO[("MinIO<br/>banvic-lake (versionado)<br/>banvic-airflow-logs (retenção 30 d)")]
       DW[("PostgreSQL 17<br/>banvic_dw<br/>bronze · silver · gold · ops")]
     end
     subgraph NSA["namespace: airflow"]
@@ -53,7 +53,7 @@ flowchart TB
   MK --> TF --> KIND
   ZIP -- "make seed (API S3 :9000)" --> MINIO
   SCH -- "KubernetesPodOperator" --> POD
-  SCH -- "sensor, validação, auditoria" --> MINIO
+  SCH -- "sensor, validação, auditoria,<br/>logs das tarefas" --> MINIO
   SCH --> DW
   POD --> MINIO
   POD --> DW
@@ -261,6 +261,12 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
   `BANVIC_ALERT_WEBHOOK_URL` estiver definido (Slack/Teams via Secret), o alerta também é enviado.
 - **Pods**: sucesso → removido; falha → mantido para inspeção (`on_finish_action="delete_succeeded_pod"`),
   com eventos do Kubernetes anexados ao log.
+- **Logs persistentes (remote logging)**: ao fim de cada tentativa, o log da task, incluindo a saída
+  completa dos pods Meltano/dbt, é enviado para o bucket dedicado `s3://banvic-airflow-logs/airflow/`.
+  Os logs sobrevivem a reinícios de pods e à perda do volume local, e a UI do Airflow lê de lá. O bucket
+  tem usuário próprio (`svc-airflow-logs`: lê e grava, **não apaga**, sem acesso ao lake) e regra de
+  ciclo de vida de 30 dias. Logs dos componentes (scheduler, API) vão para o stdout do pod, padrão do
+  Kubernetes; em produção, um coletor (Fluent Bit → CloudWatch) os centraliza.
 - **Observabilidade de dados**: `ops.pipeline_audit` (contagem por camada a cada execução),
   `manifest.json` no lake e `run_results.json` do dbt publicados em `s3://banvic-lake/ops/dbt_artifacts/`.
 - **Assets do Airflow 3**: as tasks de carga declaram `outlets`, criando linhagem na UI e permitindo
@@ -275,6 +281,7 @@ O CI prova isso: o job `data-pipeline` roda a carga **duas vezes** e valida as c
 | Nenhuma credencial no código | Senhas geradas por `random_password` no Terraform → Kubernetes Secrets → `envFrom`/`AIRFLOW_CONN_*`. `meltano.yml`, `profiles.yml`, DAGs e values do Helm só referenciam **nomes** de Secrets/variáveis. O CI roda **Trivy** para detectar segredos commitados |
 | Menor privilégio no DW | 4 roles: `svc_ingestion` (escreve Bronze), `svc_transform` (lê Bronze, escreve Silver/Gold), `svc_orchestrator` (lê tudo, escreve `ops`), `analyst` (lê **só a Gold**). `make validate` comprova que `analyst` é bloqueado na Silver |
 | Menor privilégio no lake | Aplicações usam o usuário `svc-pipeline` com política restrita ao bucket; a credencial root do MinIO só é usada pelo Job de setup. Bucket privado e versionado |
+| Logs de auditoria | Bucket separado (`banvic-airflow-logs`) com usuário próprio que grava mas não apaga; o pipeline não enxerga os logs e o Airflow não enxerga o lake com essa credencial |
 | Credencial por job | Pod de Bronze recebe só a senha de `svc_ingestion`; pods dbt só a de `svc_transform` |
 | LGPD / PII | CPF, e-mail e endereço ficam na Silver (acesso de engenharia). A Gold não tem PII |
 | Rede | Portas expostas apenas em `127.0.0.1` (não acessíveis pela rede local) |

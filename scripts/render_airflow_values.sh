@@ -18,6 +18,7 @@ values = {
     "pipeline_image": "banvic/pipeline:0.1.0",
     "jobs_namespace": "airflow",
     "lake_bucket": "banvic-lake",
+    "logs_bucket": "banvic-airflow-logs",
     "metadata_secret": "airflow-metadata",
     "fernet_secret": "airflow-fernet-key",
     "api_secret": "airflow-api-secret-key",
